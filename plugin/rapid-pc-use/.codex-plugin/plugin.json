@@ -1,0 +1,35 @@
+{
+  "name": "rapid-pc-use",
+  "version": "0.1.2",
+  "description": "High-speed native Windows desktop control for Codex and ChatGPT desktop.",
+  "author": {
+    "name": "Rapid PC Use contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "windows",
+    "desktop-automation",
+    "mouse",
+    "keyboard"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Rapid PC Use",
+    "shortDescription": "Fast native control of any Windows app",
+    "longDescription": "Operate the full Windows desktop with rapid per-monitor screenshots, real mouse and keyboard input, batched actions, and physical-Escape takeover.",
+    "developerName": "Rapid PC Use contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Operate my Windows PC and complete this task",
+      "Open an app and do this for me",
+      "Visually supervise this long-running task"
+    ],
+    "brandColor": "#339CFF"
+  }
+}

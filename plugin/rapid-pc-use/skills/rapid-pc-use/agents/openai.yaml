@@ -1,0 +1,7 @@
+interface:
+  display_name: "Rapid PC Use"
+  short_description: "Fast native control of any Windows app"
+  default_prompt: "Use $rapid-pc-use to operate my Windows PC and complete this task."
+
+policy:
+  allow_implicit_invocation: true

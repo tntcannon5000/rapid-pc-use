@@ -1,0 +1,10 @@
+/.tools/
+/artifacts/
+/dist/
+/src/**/bin/
+/src/**/obj/
+/tools/**/bin/
+/tools/**/obj/
+*.user
+*.suo
+*.rapid-pc-use.*.bak
