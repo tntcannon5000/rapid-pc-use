@@ -28,7 +28,14 @@ function Invoke-Mcp([int]$Id, [string]$Method, [hashtable]$Parameters) {
     $process.StandardInput.WriteLine($request)
     $line = $process.StandardOutput.ReadLine()
     if (-not $line) {
-        throw 'The driver closed its output before returning an MCP response.'
+        [void]$process.WaitForExit(1000)
+        $detail = if ($process.HasExited) {
+            $stderr = $process.StandardError.ReadToEnd().Trim()
+            " Exit code: $($process.ExitCode). Stderr: $stderr"
+        } else {
+            ' The process was still running after its output closed.'
+        }
+        throw "The driver closed its output before returning an MCP response.$detail"
     }
     return $line | ConvertFrom-Json
 }
@@ -55,6 +62,9 @@ if ($observe.result.isError) {
 if ($stop.result.isError) {
     throw "Control stop failed: $((@($stop.result.content | Where-Object type -eq 'text').text) -join ' ')"
 }
+if ($process.ExitCode -ne 0) {
+    throw "The driver exited with code $($process.ExitCode)."
+}
 
 $manifestText = [string]($observe.result.content | Where-Object type -eq 'text' | Select-Object -First 1 -ExpandProperty text)
 $manifestMatch = [Regex]::Match($manifestText, '^RAPID_PC_FRAME (?<json>.+)$')
@@ -63,11 +73,24 @@ $displayCount = if ($manifestMatch.Success) {
 } else {
     0
 }
+$imageCount = @($observe.result.content | Where-Object type -eq 'image').Count
+$pluginVersion = [string]((Get-Content -Raw -LiteralPath (Join-Path $root 'plugin\rapid-pc-use\.codex-plugin\plugin.json') | ConvertFrom-Json).version)
+$pluginVersion = $pluginVersion.Split('+')[0]
+if ($displayCount -le 0) {
+    throw 'The observation returned no displays.'
+}
+if ($imageCount -ne $displayCount) {
+    throw "The observation returned $imageCount display images for $displayCount displays."
+}
+if ([string]$initialize.result.serverInfo.version -ne $pluginVersion) {
+    throw "Driver version '$($initialize.result.serverInfo.version)' does not match plugin version '$pluginVersion'."
+}
 
 [pscustomobject]@{
     Server = $initialize.result.serverInfo.name
     Version = $initialize.result.serverInfo.version
     Displays = $displayCount
+    Images = $imageCount
     ActiveObserve = 'passed'
     Stop = 'passed'
     ProcessExit = $process.ExitCode

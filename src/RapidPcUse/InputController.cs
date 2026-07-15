@@ -9,7 +9,7 @@ internal sealed class InputController
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly HashSet<string> _heldButtons = new(StringComparer.OrdinalIgnoreCase);
 
-    internal void Move(MonitorDescriptor monitor, int x, int y)
+    internal static void Move(MonitorDescriptor monitor, int x, int y)
     {
         var (screenX, screenY) = MapNormalizedPoint(monitor, x, y);
         if (!NativeMethods.SetCursorPos(screenX, screenY))
@@ -38,7 +38,7 @@ internal sealed class InputController
         }
     }
 
-    internal void RelativeMove(int x, int y)
+    internal static void RelativeMove(int x, int y)
     {
         SendMouse(NativeMethods.MouseeventfMove, 0, x, y);
     }
@@ -125,7 +125,7 @@ internal sealed class InputController
         }
     }
 
-    internal void Scroll(MonitorDescriptor? monitor, int? x, int? y, int verticalTicks, int horizontalTicks)
+    internal static void Scroll(MonitorDescriptor? monitor, int? x, int? y, int verticalTicks, int horizontalTicks)
     {
         if (monitor is not null && x.HasValue && y.HasValue)
         {

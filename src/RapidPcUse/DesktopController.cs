@@ -5,7 +5,7 @@ namespace RapidPcUse;
 internal sealed class DesktopController : IDisposable
 {
     private readonly InputController _input = new();
-    private readonly IScreenCaptureBackend _capture = new GdiScreenCaptureBackend();
+    private readonly IScreenCaptureBackend _capture;
     private readonly ControlOverlay _overlay;
     private readonly ControlSession _session;
     private readonly PhysicalEscapeHook _escapeHook;
@@ -13,8 +13,9 @@ internal sealed class DesktopController : IDisposable
     private long _lastFrameId;
     private string? _lastTopologyKey;
 
-    internal DesktopController()
+    internal DesktopController(IScreenCaptureBackend? capture = null)
     {
+        _capture = capture ?? new GdiScreenCaptureBackend();
         _overlay = new ControlOverlay();
         _session = new ControlSession(_input, _overlay);
         _escapeHook = new PhysicalEscapeHook(_session);
@@ -117,10 +118,10 @@ internal sealed class DesktopController : IDisposable
         switch (type)
         {
             case "move":
-                _input.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
+                InputController.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
                 break;
             case "relative_move":
-                _input.RelativeMove(RequiredInt(action, "x"), RequiredInt(action, "y"));
+                InputController.RelativeMove(RequiredInt(action, "x"), RequiredInt(action, "y"));
                 break;
             case "click":
                 _input.Click(
@@ -134,7 +135,7 @@ internal sealed class DesktopController : IDisposable
             case "mouse_down":
                 if (action.TryGetProperty("x", out _))
                 {
-                    _input.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
+                    InputController.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
                 }
 
                 _input.MouseDown(OptionalString(action, "button", "left"));
@@ -165,7 +166,7 @@ internal sealed class DesktopController : IDisposable
                         y = RequiredInt(action, "y");
                     }
 
-                    _input.Scroll(
+                    InputController.Scroll(
                         display,
                         x,
                         y,

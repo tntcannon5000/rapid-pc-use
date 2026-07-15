@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 
@@ -93,7 +94,7 @@ internal static class Program
         }
 
         var target = Point(args[1], args[2]);
-        var repetitions = args.Length >= 4 ? Math.Clamp(int.Parse(args[3]), 1, 20) : 1;
+        var repetitions = args.Length >= 4 ? Math.Clamp(int.Parse(args[3], CultureInfo.InvariantCulture), 1, 20) : 1;
         var requestedForeground = args.Length == 5 ? ParseHandle(args[4]) : nint.Zero;
         var activation = requestedForeground == nint.Zero ? null : ActivateWindow(requestedForeground);
         var origin = Diagnostics.PhysicalCursor();
@@ -293,9 +294,11 @@ internal static class Program
     private static nint ParseHandle(string value) =>
         value.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
             ? new nint(Convert.ToInt64(value[2..], 16))
-            : new nint(long.Parse(value));
+            : new nint(long.Parse(value, CultureInfo.InvariantCulture));
 
-    private static PointSnapshot Point(string x, string y) => new(int.Parse(x), int.Parse(y));
+    private static PointSnapshot Point(string x, string y) => new(
+        int.Parse(x, CultureInfo.InvariantCulture),
+        int.Parse(y, CultureInfo.InvariantCulture));
 }
 
 internal sealed record MatrixResult(

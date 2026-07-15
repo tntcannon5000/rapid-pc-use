@@ -7,38 +7,88 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$sdkVersion = '10.0.109'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $project = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $binRoot = [IO.Path]::GetFullPath((Join-Path $plugin 'bin'))
 $output = [IO.Path]::GetFullPath((Join-Path $binRoot $Runtime))
-$localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$localDotnetRoot = Join-Path $root ".tools\dotnet\$sdkVersion"
+$localDotnet = Join-Path $localDotnetRoot 'dotnet.exe'
 
-function Test-DotnetSdk([string]$Executable) {
+function Test-DotnetSdk([string]$Executable, [string]$Version) {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
         return $false
     }
 
     $sdks = & $Executable --list-sdks 2>$null
-    return $LASTEXITCODE -eq 0 -and $null -ne $sdks
+    return $LASTEXITCODE -eq 0 -and @($sdks | Where-Object { $_ -match "^$([Regex]::Escape($Version))\s" }).Count -gt 0
 }
 
 $dotnet = $null
 $systemDotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-if ($null -ne $systemDotnet -and (Test-DotnetSdk $systemDotnet.Source)) {
+if ($null -ne $systemDotnet -and (Test-DotnetSdk $systemDotnet.Source $sdkVersion)) {
     $dotnet = $systemDotnet.Source
 }
-elseif (Test-DotnetSdk $localDotnet) {
+elseif (Test-DotnetSdk $localDotnet $sdkVersion) {
     $dotnet = $localDotnet
 }
 else {
-    $installer = Join-Path $env:TEMP 'dotnet-install-rapid-pc-use.ps1'
-    Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
-    & $installer -Channel 9.0 -InstallDir (Split-Path $localDotnet -Parent) -NoPath
-    if ($LASTEXITCODE -ne 0) {
-        throw 'The .NET 9 SDK installation failed.'
+    $installMutex = [Threading.Mutex]::new($false, "Local\RapidPcUse.DotnetSdk.$sdkVersion")
+    $installMutexHeld = $false
+    try {
+        try {
+            $installMutexHeld = $installMutex.WaitOne([TimeSpan]::FromMinutes(10))
+        }
+        catch [Threading.AbandonedMutexException] {
+            $installMutexHeld = $true
+        }
+        if (-not $installMutexHeld) {
+            throw "Timed out waiting for another .NET $sdkVersion SDK installation to finish."
+        }
+
+        if (Test-DotnetSdk $localDotnet $sdkVersion) {
+            $dotnet = $localDotnet
+        }
+        else {
+            $installToken = [Guid]::NewGuid().ToString('N')
+            $installer = Join-Path $env:TEMP "dotnet-install-rapid-pc-use-$installToken.ps1"
+            $installParent = Split-Path $localDotnetRoot -Parent
+            $installStaging = Join-Path $installParent ".$sdkVersion.staging-$installToken"
+            New-Item -ItemType Directory -Force $installParent | Out-Null
+            try {
+                Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
+                & $installer -Version $sdkVersion -InstallDir $installStaging -NoPath
+                if ($LASTEXITCODE -ne 0 -or -not (Test-DotnetSdk (Join-Path $installStaging 'dotnet.exe') $sdkVersion)) {
+                    throw "The .NET $sdkVersion SDK installation failed."
+                }
+
+                if (Test-Path -LiteralPath $localDotnetRoot) {
+                    Remove-Item -LiteralPath $localDotnetRoot -Recurse -Force
+                }
+                Move-Item -LiteralPath $installStaging -Destination $localDotnetRoot
+            }
+            finally {
+                if (Test-Path -LiteralPath $installStaging) {
+                    Remove-Item -LiteralPath $installStaging -Recurse -Force
+                }
+                if (Test-Path -LiteralPath $installer) {
+                    Remove-Item -LiteralPath $installer -Force
+                }
+            }
+            $dotnet = $localDotnet
+        }
     }
-    $dotnet = $localDotnet
+    finally {
+        if ($installMutexHeld) {
+            $installMutex.ReleaseMutex()
+        }
+        $installMutex.Dispose()
+    }
+}
+
+if (-not (Test-DotnetSdk $dotnet $sdkVersion)) {
+    throw "The required .NET SDK $sdkVersion is unavailable."
 }
 
 $dotnetRoot = Split-Path $dotnet -Parent

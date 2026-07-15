@@ -24,7 +24,11 @@ internal sealed class PhysicalEscapeHook : IDisposable
             Name = "Rapid PC Use physical Escape hook",
         };
         _thread.Start();
-        _ready.Wait();
+        if (!_ready.Wait(TimeSpan.FromSeconds(2)))
+        {
+            throw new TimeoutException("The physical Escape takeover hook did not initialize within two seconds.");
+        }
+
         if (_startupError is not null)
         {
             throw new InvalidOperationException("Unable to install the physical Escape takeover hook.", _startupError);

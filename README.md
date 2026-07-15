@@ -2,6 +2,16 @@
 
 Rapid PC Use is a clean-room, speed-first Windows computer-use driver for Codex and ChatGPT desktop. It gives the model the real Windows cursor and keyboard, one image per display, batched native actions, and physical-Escape takeover.
 
+This repository is a **public beta**. The core control path is usable, but the release executable is not code-signed and the capture backend is still GDI-based. Use it only on a desktop where you can safely take over with the physical Escape key.
+
+## Requirements
+
+- Windows 11 x64, or another x64 Windows release still supported by Microsoft and .NET 10.
+- A current Codex or ChatGPT desktop build with local plugin support.
+- PowerShell 5.1 or later for the install and verification scripts.
+
+Windows SmartScreen may warn about the unsigned beta executable. Verify the release archive against its published SHA-256 file before running it.
+
 ## Install
 
 From PowerShell in this directory:
@@ -48,7 +58,7 @@ Build and republish the plugin binary with:
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-The build downloads the official .NET 9 SDK into `.tools\dotnet` only when no SDK is already available. End users receive a self-contained executable and do not need .NET installed.
+The build requires the exact .NET 10.0.109 SDK pinned in `global.json`. If it is not installed system-wide, the script downloads that official SDK into `.tools\dotnet`. End users receive a self-contained executable and do not need .NET installed.
 
 The self-contained plugin redistributes .NET and WPF runtime components. Their license and third-party notices are included as `DOTNET-LICENSE.txt` and `DOTNET-THIRD-PARTY-NOTICES.txt` inside the plugin directory and are refreshed by every build.
 
@@ -58,6 +68,12 @@ Run the bounded active-control smoke check with:
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
 ```
 
+Before a release, run the complete build, formatting, metadata, smoke, package, and checksum gate with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
+```
+
 Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs, tool timing, capture metrics, safe action metadata, native Windows error details, and full exception chains. The log rotates at 4 MB with three retained archives and never records screenshots, typed content, or literal key values.
 
 Create the offline distributable with:
@@ -65,3 +81,5 @@ Create the offline distributable with:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```
+
+Packaging rebuilds by default and writes both `dist\rapid-pc-use-win-x64.zip` and its `.sha256` companion. See `RELEASING.md` for the short release checklist.
