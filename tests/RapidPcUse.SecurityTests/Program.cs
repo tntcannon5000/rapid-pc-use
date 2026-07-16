@@ -77,6 +77,7 @@ static void IdleSessionExpires()
 static void ProtocolReaderIsBounded()
 {
     Assert(McpServer.ReadBoundedLine(new StringReader("abc\n"), 3) == "abc", "exact limit should pass");
+    Assert(McpServer.ReadBoundedLine(new StringReader("\uFEFFabc\n"), 3) == "abc", "initial UTF-8 BOM should be ignored");
     Expect<Exception>(() => McpServer.ReadBoundedLine(new StringReader("abcd\nnext\n"), 3));
     Assert(McpServer.ReadBoundedLine(new StringReader(string.Empty), 3) is null, "EOF should return null");
 }

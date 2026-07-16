@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace RapidPcUse;
 
@@ -8,6 +9,9 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        Console.InputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
         AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
             DriverLog.Error(
                 "driver.unhandled_exception",

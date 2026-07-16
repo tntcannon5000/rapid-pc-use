@@ -37,11 +37,19 @@ function Invoke-Mcp([int]$Id, [string]$Method, [hashtable]$Parameters) {
         }
         throw "The driver closed its output before returning an MCP response.$detail"
     }
-    return $line | ConvertFrom-Json
+    $response = $line | ConvertFrom-Json
+    if ($null -ne $response.error) {
+        throw "MCP method '$Method' failed with JSON-RPC code $($response.error.code): $($response.error.message)"
+    }
+    return $response
 }
 
 try {
-    $initialize = Invoke-Mcp 1 'initialize' @{ protocolVersion = '2025-11-25' }
+    $initialize = Invoke-Mcp 1 'initialize' @{
+        protocolVersion = '2025-11-25'
+        capabilities = @{}
+        clientInfo = @{ name = 'rapid-pc-use-release-smoke'; version = '1' }
+    }
     $observe = Invoke-Mcp 2 'tools/call' @{
         name = 'pc_observe'
         arguments = @{ begin_control = $true }

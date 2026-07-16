@@ -624,6 +624,14 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 continue;
             }
 
+            // RFC 8259 permits parsers to ignore an initial UTF-8 BOM for
+            // interoperability. Windows PowerShell emits one on redirected
+            // standard input before the first JSON-RPC request.
+            if (builder.Length == 0 && value == '\uFEFF')
+            {
+                continue;
+            }
+
             if (builder.Length >= maximumCharacters)
             {
                 while ((value = reader.Read()) is not (-1 or '\n'))
