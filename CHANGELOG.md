@@ -10,6 +10,7 @@ Security-hardening beta.
 - Require explicit plugin invocation and per-tool approval by default.
 - Verify the official SDK archive against a pinned Microsoft SHA-512 before extraction.
 - Add cancellation, resource bounds, privacy redaction, frame freshness, security tests, and release provenance controls.
+- Document unsigned public-beta distribution and require signed tags, checksums, SBOMs, and provenance instead of paid Authenticode infrastructure.
 
 ## 0.1.2 - 2026-07-15
 

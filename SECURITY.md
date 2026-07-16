@@ -12,4 +12,6 @@ Include the Rapid PC Use version, Windows version, reproduction steps, expected 
 
 ## Security boundary
 
-Rapid PC Use intentionally sends real mouse and keyboard input to the interactive Windows session. It cannot cross the Windows secure desktop, lock or login screens, Ctrl+Alt+Delete, integrity-level boundaries into elevated applications, or application-specific input protections. Official release executables must carry a valid Authenticode signature and be traceable to a signed Git tag and published build provenance.
+Rapid PC Use intentionally sends real mouse and keyboard input to the interactive Windows session. It cannot cross the Windows secure desktop, lock or login screens, Ctrl+Alt+Delete, integrity-level boundaries into elevated applications, or application-specific input protections.
+
+Public-beta executables are not Authenticode-signed. Releases must instead be traceable to a GitHub-verified signed tag, protected CI, a published SHA-256, an SPDX SBOM, and GitHub build-provenance attestation. Treat SmartScreen warnings as expected beta behavior and never bypass a checksum or provenance mismatch.

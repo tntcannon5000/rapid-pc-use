@@ -2,7 +2,7 @@
 
 Rapid PC Use is a clean-room, speed-first Windows computer-use driver for Codex and ChatGPT desktop. It gives the model the real Windows cursor and keyboard, one image per display, batched native actions, and physical-Escape takeover.
 
-This repository is a **public beta**. The capture backend is still GDI-based. Use it only on a desktop where you can safely take over with the physical Escape key, and install only signed release artifacts whose checksum and provenance verify.
+This repository is a **public beta**. The capture backend is still GDI-based and the Windows executable is not Authenticode-signed. Use it only on a desktop where you can safely take over with the physical Escape key.
 
 ## Requirements
 
@@ -10,7 +10,7 @@ This repository is a **public beta**. The capture backend is still GDI-based. Us
 - A current Codex or ChatGPT desktop build with local plugin support.
 - PowerShell 5.1 or later for the install and verification scripts.
 
-Do not install an unsigned beta executable. Verify the release archive against its published SHA-256, signature, SBOM, and build provenance before running it.
+Windows SmartScreen may warn about the unsigned beta executable. Before running it, verify the archive against its published SHA-256 and GitHub build-provenance attestation, and review the accompanying SBOM.
 
 ## Install
 
@@ -22,7 +22,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 The installer uses the bundled self-contained `win-x64` host, verifies that the copied executable hash is exact, installs the `rapid-pc-use` personal plugin, and configures its native tools to prompt for approval. Restart the ChatGPT desktop app and start a new task. Then ask naturally, for example:
 
-The installer rejects an executable without a valid Authenticode signature. Repository contributors testing a locally built binary must explicitly pass `-AllowUnsignedDevelopmentBuild`; that exception is for local development only and must never be used for a published artifact.
+The installer prominently warns when the executable is unsigned and always verifies that the installed executable is byte-for-byte identical to the selected build artifact.
 
 - "Open Discord and message Alex that the deploy is finished."
 - "Go to the AWS console and configure this infrastructure."

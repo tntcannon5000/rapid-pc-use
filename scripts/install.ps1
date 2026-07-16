@@ -2,8 +2,7 @@
 param(
     [switch]$ForceBuild,
     [switch]$SkipGlobalGuidance,
-    [switch]$EnableFastMode,
-    [switch]$AllowUnsignedDevelopmentBuild
+    [switch]$EnableFastMode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,10 +21,7 @@ if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
 $sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash
 $sourceSignature = Get-AuthenticodeSignature -LiteralPath $sourceExe
 if ($sourceSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
-    if (-not $AllowUnsignedDevelopmentBuild) {
-        throw 'The driver does not have a valid Authenticode signature. Official installs reject unsigned artifacts.'
-    }
-    Write-Warning 'Installing an explicitly allowed unsigned development build. Do not redistribute this artifact.'
+    Write-Warning 'This public-beta executable is not Authenticode-signed. Verify its SHA-256 and GitHub provenance before installation.'
 }
 
 $pluginParent = [IO.Path]::GetFullPath((Join-Path $HOME 'plugins'))
@@ -77,7 +73,8 @@ if ($installedExeHash -ne $sourceExeHash) {
     throw 'The installed driver hash does not match the verified build artifact.'
 }
 $installedSignature = Get-AuthenticodeSignature -LiteralPath $installedExe
-if (-not $AllowUnsignedDevelopmentBuild -and $installedSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+if ($sourceSignature.Status -eq [Management.Automation.SignatureStatus]::Valid -and
+    $installedSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
     throw 'The installed driver lost its valid Authenticode signature.'
 }
 $marketplacePath = Join-Path $HOME '.agents\plugins\marketplace.json'
