@@ -22,6 +22,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 The installer uses the bundled self-contained `win-x64` host, verifies that the copied executable hash is exact, installs the `rapid-pc-use` personal plugin, and configures its native tools to prompt for approval. Restart the ChatGPT desktop app and start a new task. Then ask naturally, for example:
 
+The installer rejects an executable without a valid Authenticode signature. Repository contributors testing a locally built binary must explicitly pass `-AllowUnsignedDevelopmentBuild`; that exception is for local development only and must never be used for a published artifact.
+
 - "Open Discord and message Alex that the deploy is finished."
 - "Go to the AWS console and configure this infrastructure."
 - "Watch this export and tell me when it finishes."

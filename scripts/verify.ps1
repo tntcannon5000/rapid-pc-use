@@ -157,6 +157,7 @@ $requiredEntries = @(
     'CHANGELOG.md',
     'LICENSE',
     'README.md',
+    'RELEASING.md',
     'SECURITY.md',
     'plugin/rapid-pc-use/.codex-plugin/plugin.json',
     'plugin/rapid-pc-use/bin/win-x64/rapid-pc-use.exe',

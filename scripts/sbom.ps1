@@ -21,7 +21,8 @@ foreach ($file in $files) {
     }
 }
 
-$documentNamespace = "https://github.com/tntcannon5000/rapid-pc-use/sbom/$version/$([Guid]::NewGuid().ToString('N'))"
+$archiveHash = (Get-FileHash -LiteralPath $files[1].Path -Algorithm SHA256).Hash.ToLowerInvariant()
+$documentNamespace = "https://github.com/tntcannon5000/rapid-pc-use/sbom/$version/$archiveHash"
 $fileEntries = @()
 $relationships = @(
     [ordered]@{ spdxElementId = 'SPDXRef-DOCUMENT'; relationshipType = 'DESCRIBES'; relatedSpdxElement = 'SPDXRef-Package-RapidPcUse' }

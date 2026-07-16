@@ -2,7 +2,8 @@
 param(
     [switch]$ForceBuild,
     [switch]$SkipGlobalGuidance,
-    [switch]$EnableFastMode
+    [switch]$EnableFastMode,
+    [switch]$AllowUnsignedDevelopmentBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +20,13 @@ if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     throw "Published driver not found: $sourceExe"
 }
 $sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash
+$sourceSignature = Get-AuthenticodeSignature -LiteralPath $sourceExe
+if ($sourceSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+    if (-not $AllowUnsignedDevelopmentBuild) {
+        throw 'The driver does not have a valid Authenticode signature. Official installs reject unsigned artifacts.'
+    }
+    Write-Warning 'Installing an explicitly allowed unsigned development build. Do not redistribute this artifact.'
+}
 
 $pluginParent = [IO.Path]::GetFullPath((Join-Path $HOME 'plugins'))
 $destination = [IO.Path]::GetFullPath((Join-Path $pluginParent 'rapid-pc-use'))
@@ -67,6 +75,10 @@ $installedExe = Join-Path $destination 'bin\win-x64\rapid-pc-use.exe'
 $installedExeHash = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash
 if ($installedExeHash -ne $sourceExeHash) {
     throw 'The installed driver hash does not match the verified build artifact.'
+}
+$installedSignature = Get-AuthenticodeSignature -LiteralPath $installedExe
+if (-not $AllowUnsignedDevelopmentBuild -and $installedSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+    throw 'The installed driver lost its valid Authenticode signature.'
 }
 $marketplacePath = Join-Path $HOME '.agents\plugins\marketplace.json'
 New-Item -ItemType Directory -Force (Split-Path $marketplacePath -Parent) | Out-Null

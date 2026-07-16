@@ -38,7 +38,7 @@ try {
     Copy-Item -LiteralPath $plugin -Destination (Join-Path $stage 'plugin\rapid-pc-use') -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'scripts\install.ps1') -Destination (Join-Path $stage 'scripts\install.ps1')
     Copy-Item -LiteralPath (Join-Path $root 'scripts\smoke.ps1') -Destination (Join-Path $stage 'scripts\smoke.ps1')
-    foreach ($document in @('README.md', 'CHANGELOG.md', 'SECURITY.md', 'LICENSE')) {
+    foreach ($document in @('README.md', 'CHANGELOG.md', 'RELEASING.md', 'SECURITY.md', 'LICENSE')) {
         Copy-Item -LiteralPath (Join-Path $root $document) -Destination (Join-Path $stage $document)
     }
 

@@ -14,7 +14,8 @@ if ([string]::IsNullOrWhiteSpace($env:RAPID_PC_USE_SIGNING_CERT_BASE64) -or
     throw 'Release signing credentials are not configured.'
 }
 
-$temporaryPfx = Join-Path $env:RUNNER_TEMP ("rapid-pc-use-signing-{0}.pfx" -f [Guid]::NewGuid().ToString('N'))
+$temporaryRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+$temporaryPfx = Join-Path $temporaryRoot ("rapid-pc-use-signing-{0}.pfx" -f [Guid]::NewGuid().ToString('N'))
 try {
     [IO.File]::WriteAllBytes($temporaryPfx, [Convert]::FromBase64String($env:RAPID_PC_USE_SIGNING_CERT_BASE64))
     $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
