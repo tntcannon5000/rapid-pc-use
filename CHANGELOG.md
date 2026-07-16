@@ -2,6 +2,15 @@
 
 All notable changes to Rapid PC Use are recorded here.
 
+## 0.1.3 - 2026-07-16
+
+Security-hardening beta.
+
+- Update the self-contained runtime to .NET 10.0.10 using SDK 10.0.110.
+- Require explicit plugin invocation and per-tool approval by default.
+- Verify the official SDK archive against a pinned Microsoft SHA-512 before extraction.
+- Add cancellation, resource bounds, privacy redaction, frame freshness, security tests, and release provenance controls.
+
 ## 0.1.2 - 2026-07-15
 
 First public beta candidate.

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$ForceBuild,
-    [switch]$SkipGlobalGuidance
+    [switch]$SkipGlobalGuidance,
+    [switch]$EnableFastMode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,7 @@ if ($ForceBuild -or -not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     throw "Published driver not found: $sourceExe"
 }
+$sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash
 
 $pluginParent = [IO.Path]::GetFullPath((Join-Path $HOME 'plugins'))
 $destination = [IO.Path]::GetFullPath((Join-Path $pluginParent 'rapid-pc-use'))
@@ -61,6 +63,11 @@ $manifestJson = $installedManifest | ConvertTo-Json -Depth 12
 
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($installedManifestPath, $manifestJson, $utf8NoBom)
+$installedExe = Join-Path $destination 'bin\win-x64\rapid-pc-use.exe'
+$installedExeHash = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash
+if ($installedExeHash -ne $sourceExeHash) {
+    throw 'The installed driver hash does not match the verified build artifact.'
+}
 $marketplacePath = Join-Path $HOME '.agents\plugins\marketplace.json'
 New-Item -ItemType Directory -Force (Split-Path $marketplacePath -Parent) | Out-Null
 if (Test-Path -LiteralPath $marketplacePath) {
@@ -139,9 +146,10 @@ function Set-TomlSection([string]$Text, [string]$Header, [string[]]$Lines) {
 }
 
 $config = Set-TomlSection $config '[plugins."rapid-pc-use@personal"]' @('enabled = true')
+$approvalMode = if ($EnableFastMode) { 'approve' } else { 'prompt' }
 $config = Set-TomlSection $config '[plugins."rapid-pc-use@personal".mcp_servers.rapid_pc_use]' @(
     'enabled = true',
-    'default_tools_approval_mode = "approve"'
+    "default_tools_approval_mode = `"$approvalMode`""
 )
 [IO.File]::WriteAllText($configPath, $config, $utf8NoBom)
 
@@ -173,4 +181,8 @@ When the user asks to operate the visible Windows desktop or any GUI app, use th
 Write-Host 'Rapid PC Use is installed and enabled.' -ForegroundColor Green
 Write-Host "Plugin: $destination"
 Write-Host "Marketplace: $marketplacePath"
+Write-Host "Driver SHA-256: $installedExeHash"
+if ($EnableFastMode) {
+    Write-Warning 'Fast mode was explicitly enabled. Native PC actions will not prompt for per-call approval.'
+}
 Write-Host 'Restart the ChatGPT desktop app, then open a new task and ask it to operate your PC.' -ForegroundColor Yellow

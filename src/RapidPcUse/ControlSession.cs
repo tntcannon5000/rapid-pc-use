@@ -4,14 +4,14 @@ namespace RapidPcUse;
 
 internal sealed class ControlSession : IDisposable
 {
-    private readonly object _gate = new();
+    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(3);
+    private readonly object _leaseGate = new();
+    private readonly object _cleanupGate = new();
     private readonly InputController _input;
     private readonly ControlOverlay _overlay;
+    private readonly ControlSessionState _state = new();
     private readonly Timer _idleTimer;
     private FileStream? _lease;
-    private DateTime _lastActivityUtc;
-    private bool _active;
-    private bool _interrupted;
     private bool _disposed;
 
     internal ControlSession(InputController input, ControlOverlay overlay)
@@ -21,36 +21,22 @@ internal sealed class ControlSession : IDisposable
         _idleTimer = new Timer(_ => StopIfIdle(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
-    internal bool IsActive
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _active;
-            }
-        }
-    }
-
-    internal bool WasInterrupted
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _interrupted;
-            }
-        }
-    }
+    internal bool IsActive => _state.IsActive;
 
     internal void Start()
     {
-        lock (_gate)
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_state.IsActive)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_active)
+            _state.Touch();
+            return;
+        }
+
+        lock (_leaseGate)
+        {
+            if (_state.IsActive)
             {
-                _lastActivityUtc = DateTime.UtcNow;
+                _state.Touch();
                 return;
             }
 
@@ -67,6 +53,7 @@ internal sealed class ControlSession : IDisposable
             try
             {
                 _overlay.Show();
+                _ = _state.Start();
             }
             catch
             {
@@ -74,137 +61,120 @@ internal sealed class ControlSession : IDisposable
                 _lease = null;
                 throw;
             }
-
-            _interrupted = false;
-            _active = true;
-            _lastActivityUtc = DateTime.UtcNow;
-            DriverLog.Info("control.acquired", "Native mouse and keyboard control was acquired and the user takeover cue is visible.");
         }
+
+        DriverLog.Info("control.acquired", "Native mouse and keyboard control was acquired and the user takeover cue is visible.");
     }
 
-    internal void Touch()
-    {
-        lock (_gate)
-        {
-            if (_active)
-            {
-                _lastActivityUtc = DateTime.UtcNow;
-            }
-        }
-    }
+    internal void Touch() => _state.Touch();
 
-    internal void EnsureCanAct()
-    {
-        lock (_gate)
-        {
-            if (_interrupted)
-            {
-                throw new UserTakeoverException();
-            }
+    internal ControlOperationLease BeginOperation()
+        => _state.BeginOperation(TimeSpan.FromMilliseconds(SecurityLimits.MaxBatchMilliseconds));
 
-            if (!_active)
-            {
-                throw new InvalidOperationException("No active PC control session. Call pc_observe with begin_control=true first.");
-            }
-
-            _lastActivityUtc = DateTime.UtcNow;
-        }
-    }
+    internal void ThrowIfCannotContinue(ControlOperationLease operation)
+        => _state.ThrowIfCannotContinue(operation);
 
     internal void OnPhysicalEscape()
     {
-        var shouldStop = false;
-        lock (_gate)
-        {
-            if (_active)
-            {
-                _active = false;
-                _interrupted = true;
-                shouldStop = true;
-            }
-        }
-
-        if (!shouldStop)
+        if (!_state.End(ControlEndReason.UserTakeover))
         {
             return;
         }
 
-        DriverLog.Info("control.user_takeover", "The physical Escape key returned control to the user.");
-
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            _input.ReleaseAll();
-            _overlay.Hide();
-            ReleaseLease();
-        });
+        ThreadPool.QueueUserWorkItem(_ => CompleteStop(
+            "control.user_takeover",
+            "The physical Escape key returned control to the user.",
+            throwOnError: false));
     }
 
     internal void Stop()
     {
-        bool wasActive;
-        lock (_gate)
-        {
-            wasActive = _active || _lease is not null;
-            _active = false;
-            _interrupted = false;
-        }
-
-        _input.ReleaseAll();
-        try
-        {
-            _overlay.Hide();
-        }
-        finally
-        {
-            ReleaseLease();
-        }
-
-        if (wasActive)
-        {
-            DriverLog.Info("control.released", "Native mouse and keyboard control was released and the takeover cue was hidden.");
-        }
+        var wasActive = _state.End(ControlEndReason.Stop);
+        CompleteStop(
+            wasActive ? "control.released" : null,
+            "Native mouse and keyboard control was released and the takeover cue was hidden.",
+            throwOnError: true);
     }
 
     public void Dispose()
     {
-        lock (_gate)
+        if (_disposed)
         {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
+            return;
         }
 
+        _disposed = true;
         _idleTimer.Dispose();
-        Stop();
+        _ = _state.End(ControlEndReason.Dispose);
+        CompleteStop(null, null, throwOnError: false);
     }
 
     private void StopIfIdle()
     {
-        var idle = false;
-        lock (_gate)
+        if (!_state.TryExpireIdle(IdleTimeout))
         {
-            idle = _active && DateTime.UtcNow - _lastActivityUtc > TimeSpan.FromMinutes(3);
+            return;
         }
 
-        if (idle)
+        DriverLog.Warning("control.idle_timeout", "The control session was idle for three minutes and was cancelled.");
+        CompleteStop(
+            "control.idle_released",
+            "Idle desktop control was released and the takeover cue was hidden.",
+            throwOnError: false);
+    }
+
+    private void CompleteStop(string? eventName, string? message, bool throwOnError)
+    {
+        List<Exception>? errors = null;
+        lock (_cleanupGate)
         {
-            DriverLog.Warning("control.idle_timeout", "The control session was idle for three minutes and will be released automatically.");
-            Stop();
+            try
+            {
+                _input.ReleaseAll();
+            }
+            catch (Exception exception)
+            {
+                (errors ??= []).Add(exception);
+            }
+
+            try
+            {
+                _overlay.Hide();
+            }
+            catch (Exception exception)
+            {
+                (errors ??= []).Add(exception);
+            }
+            finally
+            {
+                ReleaseLease();
+            }
+        }
+
+        if (eventName is not null && message is not null)
+        {
+            DriverLog.Info(eventName, message);
+        }
+
+        if (errors is null)
+        {
+            return;
+        }
+
+        var aggregate = new AggregateException("Desktop control cleanup did not release every resource.", errors);
+        DriverLog.Error("control.cleanup_failed", "Desktop control cleanup reported an error.", aggregate);
+        if (throwOnError)
+        {
+            throw aggregate;
         }
     }
 
     private void ReleaseLease()
     {
-        FileStream? lease;
-        lock (_gate)
+        lock (_leaseGate)
         {
-            lease = _lease;
+            _lease?.Dispose();
             _lease = null;
         }
-
-        lease?.Dispose();
     }
 }

@@ -7,7 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
-$sdkVersion = '10.0.109'
+$sdkVersion = '10.0.110'
+$sdkArchiveSha512 = '652eaabac68508925225ca4b3a4f7be0353ec69c40bff838a05709769e94b9013f8bf03ee396d0cabe8438508a83521b2ced1b23d3a3019b13c49d1feaf6b039'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $project = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
@@ -52,14 +53,19 @@ else {
         }
         else {
             $installToken = [Guid]::NewGuid().ToString('N')
-            $installer = Join-Path $env:TEMP "dotnet-install-rapid-pc-use-$installToken.ps1"
+            $sdkArchive = Join-Path $env:TEMP "dotnet-sdk-$sdkVersion-win-x64-$installToken.zip"
             $installParent = Split-Path $localDotnetRoot -Parent
             $installStaging = Join-Path $installParent ".$sdkVersion.staging-$installToken"
             New-Item -ItemType Directory -Force $installParent | Out-Null
             try {
-                Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
-                & $installer -Version $sdkVersion -InstallDir $installStaging -NoPath
-                if ($LASTEXITCODE -ne 0 -or -not (Test-DotnetSdk (Join-Path $installStaging 'dotnet.exe') $sdkVersion)) {
+                $sdkUrl = "https://builds.dotnet.microsoft.com/dotnet/Sdk/$sdkVersion/dotnet-sdk-$sdkVersion-win-x64.zip"
+                Invoke-WebRequest -UseBasicParsing $sdkUrl -OutFile $sdkArchive
+                $actualArchiveHash = (Get-FileHash -LiteralPath $sdkArchive -Algorithm SHA512).Hash.ToLowerInvariant()
+                if ($actualArchiveHash -ne $sdkArchiveSha512) {
+                    throw "The .NET SDK archive hash '$actualArchiveHash' does not match the pinned Microsoft SHA-512."
+                }
+                Expand-Archive -LiteralPath $sdkArchive -DestinationPath $installStaging
+                if (-not (Test-DotnetSdk (Join-Path $installStaging 'dotnet.exe') $sdkVersion)) {
                     throw "The .NET $sdkVersion SDK installation failed."
                 }
 
@@ -72,8 +78,8 @@ else {
                 if (Test-Path -LiteralPath $installStaging) {
                     Remove-Item -LiteralPath $installStaging -Recurse -Force
                 }
-                if (Test-Path -LiteralPath $installer) {
-                    Remove-Item -LiteralPath $installer -Force
+                if (Test-Path -LiteralPath $sdkArchive) {
+                    Remove-Item -LiteralPath $sdkArchive -Force
                 }
             }
             $dotnet = $localDotnet

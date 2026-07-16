@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace InputApiProbe;
 
@@ -122,10 +121,10 @@ internal static class Native
     internal static extern uint GetWindowThreadProcessId(nint window, out uint processId);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    internal static extern int GetWindowText(nint window, StringBuilder text, int maximum);
+    internal static extern int GetWindowText(nint window, [Out] char[] text, int maximum);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    internal static extern int GetClassName(nint window, StringBuilder className, int maximum);
+    internal static extern int GetClassName(nint window, [Out] char[] className, int maximum);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

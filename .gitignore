@@ -1,10 +1,13 @@
 /.tools/
 /artifacts/
 /dist/
+/plugin/rapid-pc-use/bin/
 /src/**/bin/
 /src/**/obj/
 /tools/**/bin/
 /tools/**/obj/
+/tests/**/bin/
+/tests/**/obj/
 *.user
 *.suo
 *.rapid-pc-use.*.bak

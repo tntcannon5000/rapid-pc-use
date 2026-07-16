@@ -198,7 +198,7 @@ internal static class InputBackends
         return new CallResult(true, 1, error, stopwatch.Elapsed.TotalMilliseconds, $"raw_delta=({dx},{dy}); void API");
     }
 
-    private static IReadOnlyList<CallResult> MouseEventClick()
+    private static List<CallResult> MouseEventClick()
     {
         var results = new List<CallResult>();
         foreach (var flags in new[] { Native.MouseEventLeftDown, Native.MouseEventLeftUp })

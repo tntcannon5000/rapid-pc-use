@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace InputApiProbe;
 
@@ -104,10 +103,10 @@ internal static class Diagnostics
 
     private static ForegroundSnapshot Foreground(nint window, uint pid, uint threadId)
     {
-        var title = new StringBuilder(512);
-        _ = Native.GetWindowText(window, title, title.Capacity);
-        var className = new StringBuilder(256);
-        _ = Native.GetClassName(window, className, className.Capacity);
+        var title = new char[512];
+        var titleLength = Native.GetWindowText(window, title, title.Length);
+        var className = new char[256];
+        var classNameLength = Native.GetClassName(window, className, className.Length);
         _ = Native.GetWindowRect(window, out var rectangle);
 
         TokenSnapshot? token = null;
@@ -139,8 +138,8 @@ internal static class Diagnostics
             threadId,
             processName,
             processSession,
-            title.ToString(),
-            className.ToString(),
+            new string(title, 0, Math.Max(0, titleLength)),
+            new string(className, 0, Math.Max(0, classNameLength)),
             Rectangle(rectangle),
             token);
     }

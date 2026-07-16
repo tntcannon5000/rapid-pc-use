@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 
 namespace RapidPcUse;
@@ -16,9 +17,25 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
 
     internal void Run()
     {
-        string? line;
-        while ((line = input.ReadLine()) is not null)
+        while (true)
         {
+            string? line;
+            try
+            {
+                line = ReadBoundedLine(input);
+            }
+            catch (ProtocolLimitException exception)
+            {
+                DriverLog.Warning("mcp.message_rejected", "The driver rejected an oversized JSON-RPC message.", exception: exception);
+                WriteProtocolError(null, -32600, "The JSON-RPC message exceeded the server limit.");
+                continue;
+            }
+
+            if (line is null)
+            {
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(line))
             {
                 continue;
@@ -32,7 +49,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             catch (Exception exception)
             {
                 DriverLog.Error("mcp.invalid_message", "The driver received an invalid JSON-RPC message.", exception);
-                WriteProtocolError(null, -32700, $"Invalid JSON-RPC message: {exception.Message}");
+                WriteProtocolError(null, -32700, "Invalid JSON-RPC message.");
             }
         }
     }
@@ -40,6 +57,12 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
     private void HandleMessage(JsonElement request)
     {
         var hasId = request.TryGetProperty("id", out var id);
+        if (hasId && !IsValidRequestId(id))
+        {
+            WriteProtocolError(null, -32600, "The JSON-RPC request ID is invalid or too long.");
+            return;
+        }
+
         var method = request.TryGetProperty("method", out var methodElement) && methodElement.ValueKind == JsonValueKind.String
             ? methodElement.GetString()
             : null;
@@ -75,12 +98,12 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         catch (MethodNotFoundException exception)
         {
             DriverLog.Warning("mcp.method_not_found", "The MCP client requested an unsupported method.", exception: exception);
-            WriteProtocolError(id, -32601, exception.Message);
+            WriteProtocolError(id, -32601, "Method not found.");
         }
         catch (Exception exception)
         {
             DriverLog.Error("mcp.request_failed", "An MCP request failed outside the PC tool boundary.", exception);
-            WriteProtocolError(id, -32603, exception.Message);
+            WriteProtocolError(id, -32603, "Internal JSON-RPC error.");
         }
     }
 
@@ -105,7 +128,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 ["version"] = BuildInfo.Version,
                 ["description"] = "Fast native Windows screenshot, mouse, keyboard, and takeover control.",
             },
-            ["instructions"] = "Start with pc_observe(begin_control=true). Use monitor-local normalized screenshot coordinates 0..1000. Batch only deterministic actions. RAPID_PC_USE_FAILURE is terminal for the task: make no more PC or target-app actions, perform only the single bounded log read it requests, then give the user a brief plain-language summary without investigating. Physical Escape means the user took over; end the model turn immediately without reading logs.",
+            ["instructions"] = "Start with pc_observe(begin_control=true); capture without the visible control cue is not permitted. Use monitor-local normalized screenshot coordinates 0..1000. Each frame is valid for 30 seconds and one action batch. Native tool calls require user approval unless the user explicitly installed fast mode. Batch only deterministic actions. RAPID_PC_USE_FAILURE is terminal for the task: make no more PC or target-app actions, perform only the single bounded log read it requests, then give the user a brief plain-language summary without investigating. Physical Escape means the user took over; end the model turn immediately without reading logs.",
         };
     }
 
@@ -119,6 +142,11 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
 
         var name = nameElement.GetString()!;
+        if (name is not ("pc_observe" or "pc_act" or "pc_stop"))
+        {
+            throw new MethodNotFoundException("Unknown tool.");
+        }
+
         var arguments = parameters.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Object
             ? args
             : default;
@@ -139,7 +167,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 "pc_observe" => Observe(arguments),
                 "pc_act" => Act(arguments),
                 "pc_stop" => Stop(),
-                _ => throw new MethodNotFoundException($"Unknown tool '{name}'."),
+                _ => throw new MethodNotFoundException("Unknown tool."),
             };
             stopwatch.Stop();
             DriverLog.Info(
@@ -224,7 +252,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             throw new ArgumentException("pc_act requires actions.");
         }
 
-        var settleMilliseconds = Math.Clamp(OptionalInteger(arguments, "settle_ms", 35), 0, 5000);
+        var settleMilliseconds = OptionalInteger(arguments, "settle_ms", 35);
         var observeAfter = OptionalBoolean(arguments, "observe_after", true);
         var observation = desktop.Act(frameId, actions, settleMilliseconds, observeAfter);
         return observation is null
@@ -306,7 +334,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         new Dictionary<string, object?>
         {
             ["name"] = "pc_observe",
-            ["description"] = "Capture every Windows display as separate images. At the start of a PC-use task, call with begin_control=true to acquire native mouse/keyboard control and show the user an Esc takeover cue. Returns a frame_id and exact display metadata. Coordinates for pc_act are always normalized monitor-local integers from 0 to 1000, independent of image/native resolution.",
+            ["description"] = "Capture every Windows display as separate images while showing the user an Esc takeover cue. begin_control must be true. Returns a single-use frame_id that expires after 30 seconds and exact display metadata. Coordinates for pc_act are normalized monitor-local integers from 0 to 1000.",
             ["inputSchema"] = new Dictionary<string, object?>
             {
                 ["type"] = "object",
@@ -315,9 +343,11 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                     ["begin_control"] = new Dictionary<string, object?>
                     {
                         ["type"] = "boolean",
-                        ["description"] = "Acquire PC control and show the control overlay. Default true.",
+                        ["const"] = true,
+                        ["description"] = "Required. Acquire PC control and show the control overlay.",
                     },
                 },
+                ["required"] = new[] { "begin_control" },
                 ["additionalProperties"] = false,
             },
             ["annotations"] = new Dictionary<string, object?>
@@ -332,7 +362,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         new Dictionary<string, object?>
         {
             ["name"] = "pc_act",
-            ["description"] = "Execute an ordered batch of real native Windows mouse/keyboard/wait actions, then return fresh screenshots in the same call. Requires the latest frame_id. Physical Escape immediately cancels, releases held inputs, and reports USER_TAKEOVER. Batch only deterministic focus-preserving steps; observe after uncertain UI transitions.",
+            ["description"] = "Execute one bounded batch of real native Windows input, consuming the latest unexpired frame_id, then optionally return fresh screenshots. The client prompts for approval unless fast mode was explicitly enabled. Physical Escape immediately cancels and releases held inputs.",
             ["inputSchema"] = ActSchema(),
             ["annotations"] = new Dictionary<string, object?>
             {
@@ -380,13 +410,13 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             ["to_y"] = CoordinateSchema("Drag destination Y, 0..1000."),
             ["button"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new[] { "left", "right", "middle", "x1", "x2" } },
             ["count"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 3 },
-            ["duration_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = 10000 },
+            ["duration_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxDragMilliseconds },
             ["scroll_y"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = -100, ["maximum"] = 100, ["description"] = "Wheel ticks; positive scrolls down, negative up." },
             ["scroll_x"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = -100, ["maximum"] = 100, ["description"] = "Wheel ticks; positive scrolls right, negative left." },
-            ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "Literal text typed as Unicode keystrokes, never clipboard paste." },
-            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = 100, ["description"] = "Delay per typed UTF-16 code unit; default 2 ms." },
-            ["keys"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "Key or '+'-joined chord, e.g. CTRL+L, ENTER, ALT+F4." },
-            ["ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = 60000 },
+            ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxTypedCodeUnitsPerAction, ["description"] = "Literal text typed as Unicode keystrokes, never clipboard paste." },
+            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; default 2 ms." },
+            ["keys"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxKeyChordCharacters, ["description"] = "Key or '+'-joined chord, e.g. CTRL+L, ENTER, ALT+F4." },
+            ["ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds },
         };
 
         return new Dictionary<string, object?>
@@ -399,7 +429,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 {
                     ["type"] = "array",
                     ["minItems"] = 1,
-                    ["maxItems"] = 32,
+                    ["maxItems"] = SecurityLimits.MaxActionsPerBatch,
                     ["items"] = new Dictionary<string, object?>
                     {
                         ["type"] = "object",
@@ -408,7 +438,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                         ["additionalProperties"] = false,
                     },
                 },
-                ["settle_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = 5000, ["description"] = "Short repaint delay after the batch; default 35 ms." },
+                ["settle_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds, ["description"] = "Short repaint delay after the batch; default 35 ms." },
                 ["observe_after"] = new Dictionary<string, object?> { ["type"] = "boolean", ["description"] = "Return fresh screenshots in this same call; default true." },
             },
             ["required"] = new[] { "frame_id", "actions" },
@@ -450,13 +480,16 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
 
         var actionTypes = new List<string>();
         var typedCodeUnits = 0;
-        foreach (var action in actions.EnumerateArray())
+        foreach (var action in actions.EnumerateArray().Take(SecurityLimits.MaxActionsPerBatch))
         {
             if (action.ValueKind == JsonValueKind.Object &&
                 action.TryGetProperty("type", out var type) &&
                 type.ValueKind == JsonValueKind.String)
             {
-                actionTypes.Add(type.GetString() ?? "unknown");
+                var rawType = type.GetString();
+                actionTypes.Add(rawType is not null && rawType.Length <= 32 && KnownActionTypes.Contains(rawType)
+                    ? rawType
+                    : "unknown");
             }
             else
             {
@@ -467,14 +500,16 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 action.TryGetProperty("text", out var text) &&
                 text.ValueKind == JsonValueKind.String)
             {
-                typedCodeUnits += text.GetString()?.Length ?? 0;
+                typedCodeUnits = Math.Min(
+                    SecurityLimits.MaxActionsPerBatch * SecurityLimits.MaxTypedCodeUnitsPerAction,
+                    typedCodeUnits + (text.GetString()?.Length ?? 0));
             }
         }
 
         return new
         {
             frame_id = frameId,
-            action_count = actionTypes.Count,
+            action_count = actions.GetArrayLength(),
             action_types = actionTypes,
             typed_code_units = typedCodeUnits,
             privacy = "Literal typed text and key values omitted.",
@@ -491,7 +526,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
 
         if (chain.Any(item => item is ArgumentOutOfRangeException))
         {
-            return "The requested pointer coordinates were outside the usable screenshot area.";
+            return "A requested numeric value was outside the configured safety limits.";
         }
 
         var win32 = chain.OfType<Win32Exception>().FirstOrDefault();
@@ -540,6 +575,15 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             ? value.GetBoolean()
             : fallback;
 
+    private static bool IsValidRequestId(JsonElement id)
+        => id.ValueKind switch
+        {
+            JsonValueKind.Null => true,
+            JsonValueKind.Number => id.GetRawText().Length <= 64,
+            JsonValueKind.String => id.GetString()?.Length <= 128,
+            _ => false,
+        };
+
     private static int OptionalInteger(JsonElement arguments, string property, int fallback)
         => arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty(property, out var value) && value.TryGetInt32(out var result)
             ? result
@@ -555,6 +599,42 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
 
         return result;
+    }
+
+    internal static string? ReadBoundedLine(
+        TextReader reader,
+        int maximumCharacters = SecurityLimits.MaxRequestLineCharacters)
+    {
+        var builder = new StringBuilder(Math.Min(maximumCharacters, 4096));
+        while (true)
+        {
+            var value = reader.Read();
+            if (value == -1)
+            {
+                return builder.Length == 0 ? null : builder.ToString();
+            }
+
+            if (value == '\n')
+            {
+                return builder.ToString();
+            }
+
+            if (value == '\r')
+            {
+                continue;
+            }
+
+            if (builder.Length >= maximumCharacters)
+            {
+                while ((value = reader.Read()) is not (-1 or '\n'))
+                {
+                }
+
+                throw new ProtocolLimitException();
+            }
+
+            builder.Append((char)value);
+        }
     }
 
     private void WriteResult(JsonElement id, object result)
@@ -585,5 +665,24 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
 
     private sealed class MethodNotFoundException(string message) : Exception(message);
 
+    private sealed class ProtocolLimitException()
+        : Exception("The JSON-RPC message exceeded the configured character limit.");
+
     private sealed record ToolOutcome(object Result, object? LogData);
+
+    private static readonly HashSet<string> KnownActionTypes = new(StringComparer.Ordinal)
+    {
+        "move",
+        "relative_move",
+        "click",
+        "mouse_down",
+        "mouse_up",
+        "drag",
+        "scroll",
+        "type",
+        "key",
+        "key_down",
+        "key_up",
+        "wait",
+    };
 }

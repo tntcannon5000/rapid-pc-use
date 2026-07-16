@@ -36,6 +36,9 @@ internal sealed class UserTakeoverException : Exception
 
 internal sealed class StaleFrameException(string message) : Exception(message);
 
+internal sealed class ControlSessionEndedException()
+    : Exception("The desktop control session ended before the action completed.");
+
 internal sealed class PcActionException : Exception
 {
     internal PcActionException(int actionIndex, string actionType, string safeDescription, Exception innerException)

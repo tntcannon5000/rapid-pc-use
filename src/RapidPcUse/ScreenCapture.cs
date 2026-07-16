@@ -29,11 +29,41 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
     {
         var stopwatch = Stopwatch.StartNew();
         var monitors = MonitorManager.GetMonitors();
+        ValidateCaptureResources(monitors);
         var topologyKey = MonitorManager.GetTopologyKey(monitors);
         var tasks = monitors.Select(monitor => Task.Run(() => CaptureMonitor(frameId, monitor))).ToArray();
         Task.WaitAll(tasks);
         var frames = tasks.Select(task => task.Result).ToArray();
         return new Observation(frameId, topologyKey, frames, stopwatch.ElapsedMilliseconds, controlActive);
+    }
+
+    internal static void ValidateCaptureResources(IReadOnlyList<MonitorDescriptor> monitors)
+    {
+        if (monitors.Count == 0 || monitors.Count > SecurityLimits.MaxDisplays)
+        {
+            throw new InvalidOperationException($"Screen capture supports between 1 and {SecurityLimits.MaxDisplays} displays.");
+        }
+
+        long totalPixels = 0;
+        foreach (var monitor in monitors)
+        {
+            if (monitor.Width <= 0 || monitor.Height <= 0)
+            {
+                throw new InvalidOperationException("A display reported invalid capture dimensions.");
+            }
+
+            var pixels = checked((long)monitor.Width * monitor.Height);
+            if (pixels > SecurityLimits.MaxPixelsPerDisplay)
+            {
+                throw new InvalidOperationException("A display exceeds the per-display screenshot resource limit.");
+            }
+
+            totalPixels = checked(totalPixels + pixels);
+            if (totalPixels > SecurityLimits.MaxTotalCapturePixels)
+            {
+                throw new InvalidOperationException("The desktop exceeds the total screenshot resource limit.");
+            }
+        }
     }
 
     private ScreenFrame CaptureMonitor(long frameId, MonitorDescriptor monitor)

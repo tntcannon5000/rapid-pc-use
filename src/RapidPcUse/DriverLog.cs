@@ -157,24 +157,20 @@ internal static class DriverLog
         File.Move(FilePath, $"{FilePath}.1", true);
     }
 
-    private static Dictionary<string, object?> ExceptionDetails(Exception exception)
+    internal static Dictionary<string, object?> ExceptionDetails(Exception exception)
     {
         var chain = new List<object>();
-        for (Exception? current = exception; current is not null; current = current.InnerException)
+        for (Exception? current = exception; current is not null && chain.Count < 8; current = current.InnerException)
         {
             var item = new Dictionary<string, object?>
             {
                 ["type"] = current.GetType().FullName,
-                ["message"] = current.Message,
                 ["hresult"] = $"0x{current.HResult:X8}",
             };
 
             if (current is Win32Exception win32)
             {
                 item["native_error_code"] = win32.NativeErrorCode;
-                item["native_error_message"] = win32.NativeErrorCode == 0
-                    ? "Windows returned no extended error code."
-                    : new Win32Exception(win32.NativeErrorCode).Message;
             }
 
             if (current.Data.Count > 0)
@@ -182,13 +178,16 @@ internal static class DriverLog
                 var exceptionData = new Dictionary<string, object?>();
                 foreach (DictionaryEntry entry in current.Data)
                 {
-                    if (entry.Key is not null)
+                    if (entry.Key is string key && SafeExceptionDataKeys.Contains(key) && IsSafeScalar(entry.Value))
                     {
-                        exceptionData[entry.Key.ToString()!] = entry.Value;
+                        exceptionData[key] = entry.Value;
                     }
                 }
 
-                item["data"] = exceptionData;
+                if (exceptionData.Count > 0)
+                {
+                    item["data"] = exceptionData;
+                }
             }
 
             chain.Add(item);
@@ -197,9 +196,30 @@ internal static class DriverLog
         return new Dictionary<string, object?>
         {
             ["chain"] = chain,
-            ["stack_trace"] = exception.ToString(),
+            ["details_redacted"] = true,
         };
     }
+
+    private static readonly HashSet<string> SafeExceptionDataKeys = new(StringComparer.Ordinal)
+    {
+        "action_index",
+        "action_type",
+        "normalized_x",
+        "normalized_y",
+        "target_pixel_x",
+        "target_pixel_y",
+        "cursor_before_pixel_x",
+        "cursor_before_pixel_y",
+        "virtual_desktop_left",
+        "virtual_desktop_top",
+        "virtual_desktop_width",
+        "virtual_desktop_height",
+        "requested_input_events",
+        "accepted_input_events",
+    };
+
+    private static bool IsSafeScalar(object? value)
+        => value is null or bool or byte or sbyte or short or ushort or int or uint or long or ulong;
 
     private static void AddIfPresent(Dictionary<string, object?> entry, string name, string? value)
     {

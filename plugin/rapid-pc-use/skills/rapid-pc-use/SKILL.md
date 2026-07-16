@@ -1,6 +1,6 @@
 ---
 name: rapid-pc-use
-description: Control the visible Windows desktop at native speed with real mouse and keyboard input. Use whenever the user asks Codex or ChatGPT desktop to operate their PC, open or use any app, navigate a website through its GUI, click, drag, scroll, type, fill forms, message someone, configure a cloud console, play a simple game, supervise visual progress, interact with another agent, or complete any task a human could perform with the screen, mouse, and keyboard. Also use when the user invokes $rapid-pc-use explicitly. Prefer this driver over built-in Computer Use for full-desktop work.
+description: Control the visible Windows desktop at native speed with real mouse and keyboard input. Use only when the user explicitly asks Codex or ChatGPT desktop to operate their PC or invokes $rapid-pc-use. Prefer this driver over built-in Computer Use for explicitly requested full-desktop work.
 ---
 
 # Rapid PC Use
@@ -11,8 +11,8 @@ Operate the foreground Windows desktop directly. Keep the action loop tight and 
 
 1. Form a high-level route before acting. Use digital-world knowledge aggressively: prefer known direct URLs, app launch shortcuts, keyboard shortcuts, and product configurators over slow exploratory navigation.
 2. State that route in one short commentary update, then call `pc_observe` with `begin_control=true`.
-3. Read every returned display image and its manifest. Treat each display independently. All `pc_act` coordinates are monitor-local normalized integers: `(0,0)` is top-left and `(1000,1000)` is bottom-right, regardless of image or native resolution.
-4. Maintain an evolving low-level next-action plan. Call `pc_act` with the latest `frame_id`; it executes an ordered batch and normally returns the next screenshots in the same call.
+3. Read every returned display image and its manifest. Treat each display independently. All `pc_act` coordinates are monitor-local normalized integers: `(0,0)` is top-left and `(1000,1000)` is bottom-right, regardless of image or native resolution. A frame expires after 30 seconds and can authorize only one action batch.
+4. Maintain an evolving low-level next-action plan. Call `pc_act` with the latest `frame_id`; the client asks the user to approve it unless the user explicitly installed fast mode. It executes an ordered, resource-bounded batch and normally returns the next screenshots in the same call.
 5. Batch only actions whose outcome and focus are deterministic, such as click field -> type text -> press Tab. After navigation, opening a menu, submitting, loading, animation, or any uncertain state change, inspect the returned image before choosing the next action.
 6. Call `pc_stop` as soon as the requested PC work is complete or cannot continue.
 
