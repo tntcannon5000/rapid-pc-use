@@ -12,7 +12,7 @@ This repository is a **public beta**. The capture backend is still GDI-based and
 
 ## Install
 
-For agents or automated systems installing Rapid PC Use, clone this repository and follow [`agent_install/AGENT_INSTALL_INSTRUCTIONS.md`](./agent_install/AGENT_INSTALL_INSTRUCTIONS.md).
+For agents or automated systems installing or updating Rapid PC Use, clone this repository and follow [`agent_install/AGENT_INSTALL_INSTRUCTIONS.md`](./agent_install/AGENT_INSTALL_INSTRUCTIONS.md).
 
 For manual installation, run the same entry point from the repository root:
 
