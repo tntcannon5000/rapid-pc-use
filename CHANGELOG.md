@@ -12,6 +12,7 @@ Security-hardening beta.
 - Add cancellation, resource bounds, privacy redaction, frame freshness, security tests, and protected CI controls.
 - Document the unsigned public-beta boundary and retain signed Git history without requiring paid Authenticode infrastructure.
 - Provide a one-command, agent-facing source installer that builds with the pinned SDK and verifies every installed copy.
+- Ground references such as "this file" in the visible desktop before searching off-screen or asking the user.
 
 ## 0.1.2 - 2026-07-15
 
