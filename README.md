@@ -10,19 +10,17 @@ This repository is a **public beta**. The capture backend is still GDI-based and
 - A current Codex or ChatGPT desktop build with local plugin support.
 - PowerShell 5.1 or later for the install and verification scripts.
 
-Windows SmartScreen may warn about the unsigned beta executable. Before running it, verify the archive against its published SHA-256 and GitHub build-provenance attestation, and review the accompanying SBOM.
-
 ## Install
 
-From PowerShell in this directory:
+For agents or automated systems installing Rapid PC Use, clone this repository and follow [`agent_install/AGENT_INSTALL_INSTRUCTIONS.md`](./agent_install/AGENT_INSTALL_INSTRUCTIONS.md).
+
+For manual installation, run the same entry point from the repository root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+powershell -ExecutionPolicy Bypass -File .\agent_install\install.ps1
 ```
 
-The installer uses the bundled self-contained `win-x64` host, verifies that the copied executable hash is exact, installs the `rapid-pc-use` personal plugin, and configures its native tools to prompt for approval. Restart the ChatGPT desktop app and start a new task. Then ask naturally, for example:
-
-The installer prominently warns when the executable is unsigned and always verifies that the installed executable is byte-for-byte identical to the selected build artifact.
+The locally built public-beta executable is not Authenticode-signed, so install only from a checkout you trust. Restart Codex or ChatGPT desktop after installation. Then ask naturally, for example:
 
 - "Open Discord and message Alex that the deploy is finished."
 - "Go to the AWS console and configure this infrastructure."
@@ -62,7 +60,7 @@ Build and republish the plugin binary with:
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-The build requires the exact .NET 10.0.110 SDK pinned in `global.json`. If it is not installed system-wide, the script downloads the official SDK ZIP into `.tools\dotnet` only after verifying Microsoft's pinned SHA-512. End users receive a self-contained executable and do not need .NET installed.
+The build requires the exact .NET 10.0.110 SDK pinned in `global.json`. If it is not installed system-wide, the script downloads the official SDK ZIP into `.tools\dotnet` only after verifying Microsoft's pinned SHA-512. The resulting executable is self-contained.
 
 The self-contained plugin redistributes .NET and WPF runtime components. Their license and third-party notices are included as `DOTNET-LICENSE.txt` and `DOTNET-THIRD-PARTY-NOTICES.txt` inside the plugin directory and are refreshed by every build.
 
@@ -72,18 +70,10 @@ Run the bounded active-control smoke check with:
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
 ```
 
-Before a release, run the complete build, formatting, metadata, smoke, package, and checksum gate with:
+Before committing, run the complete build, formatting, metadata, security-test, and smoke gate with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
 Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs, tool timing, capture metrics, bounded safe action metadata, exception types, and numeric native error codes. Messages, stack traces, arbitrary exception data, screenshots, typed content, and literal key values are omitted. The log rotates at 4 MB with three retained archives.
-
-Create the offline distributable with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
-```
-
-Packaging rebuilds by default and writes both `dist\rapid-pc-use-win-x64.zip` and its `.sha256` companion. See `RELEASING.md` for the short release checklist.

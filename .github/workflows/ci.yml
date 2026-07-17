@@ -20,18 +20,9 @@ jobs:
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         with:
           dotnet-version: 10.0.110
-      - name: Run release gate without interactive smoke
+      - name: Run verification without interactive smoke
         shell: powershell
         run: .\scripts\verify.ps1 -SkipSmoke
-      - name: Upload verification package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: rapid-pc-use-ci-package
-          path: |
-            dist/rapid-pc-use-win-x64.zip
-            dist/rapid-pc-use-win-x64.zip.sha256
-          if-no-files-found: error
-          retention-days: 7
 
   dependency-review:
     if: github.event_name == 'pull_request'

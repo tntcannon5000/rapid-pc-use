@@ -9,8 +9,9 @@ Security-hardening beta.
 - Update the self-contained runtime to .NET 10.0.10 using SDK 10.0.110.
 - Require explicit plugin invocation and per-tool approval by default.
 - Verify the official SDK archive against a pinned Microsoft SHA-512 before extraction.
-- Add cancellation, resource bounds, privacy redaction, frame freshness, security tests, and release provenance controls.
-- Document unsigned public-beta distribution and require signed tags, checksums, SBOMs, and provenance instead of paid Authenticode infrastructure.
+- Add cancellation, resource bounds, privacy redaction, frame freshness, security tests, and protected CI controls.
+- Document the unsigned public-beta boundary and retain signed Git history without requiring paid Authenticode infrastructure.
+- Provide a one-command, agent-facing source installer that builds with the pinned SDK and verifies every installed copy.
 
 ## 0.1.2 - 2026-07-15
 

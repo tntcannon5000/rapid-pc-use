@@ -16,6 +16,19 @@ $binRoot = [IO.Path]::GetFullPath((Join-Path $plugin 'bin'))
 $output = [IO.Path]::GetFullPath((Join-Path $binRoot $Runtime))
 $localDotnetRoot = Join-Path $root ".tools\dotnet\$sdkVersion"
 $localDotnet = Join-Path $localDotnetRoot 'dotnet.exe'
+$buildMutex = [Threading.Mutex]::new($false, "Local\RapidPcUse.Build.$Runtime")
+$buildMutexHeld = $false
+
+try {
+    try {
+        $buildMutexHeld = $buildMutex.WaitOne([TimeSpan]::FromMinutes(15))
+    }
+    catch [Threading.AbandonedMutexException] {
+        $buildMutexHeld = $true
+    }
+    if (-not $buildMutexHeld) {
+        throw 'Timed out waiting for another Rapid PC Use build to finish.'
+    }
 
 function Test-DotnetSdk([string]$Executable, [string]$Version) {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
@@ -109,6 +122,20 @@ foreach ($entry in $redistributionFiles.GetEnumerator()) {
 }
 
 New-Item -ItemType Directory -Force $binRoot | Out-Null
+$staleStaging = @(Get-ChildItem -LiteralPath $binRoot -Directory -Force -Filter ".$Runtime.staging-*")
+$staleBackups = @(Get-ChildItem -LiteralPath $binRoot -Directory -Force -Filter ".$Runtime.backup-*" | Sort-Object LastWriteTimeUtc -Descending)
+if (-not (Test-Path -LiteralPath $output) -and $staleBackups.Count -gt 0) {
+    Move-Item -LiteralPath $staleBackups[0].FullName -Destination $output
+    $staleBackups = @($staleBackups | Select-Object -Skip 1)
+}
+foreach ($abandoned in @($staleStaging) + @($staleBackups)) {
+    $abandonedPath = [IO.Path]::GetFullPath($abandoned.FullName)
+    if (-not $abandonedPath.StartsWith($binRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean an abandoned build directory outside the plugin bin directory: $abandonedPath"
+    }
+    Remove-Item -LiteralPath $abandonedPath -Recurse -Force
+}
+
 $token = [Guid]::NewGuid().ToString('N')
 $staging = [IO.Path]::GetFullPath((Join-Path $binRoot ".$Runtime.staging-$token"))
 $backup = [IO.Path]::GetFullPath((Join-Path $binRoot ".$Runtime.backup-$token"))
@@ -166,3 +193,10 @@ foreach ($entry in $redistributionFiles.GetEnumerator()) {
 }
 
 Write-Host "Built Rapid PC Use: $output" -ForegroundColor Green
+}
+finally {
+    if ($buildMutexHeld) {
+        $buildMutex.ReleaseMutex()
+    }
+    $buildMutex.Dispose()
+}

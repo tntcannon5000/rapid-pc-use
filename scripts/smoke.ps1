@@ -48,7 +48,7 @@ try {
     $initialize = Invoke-Mcp 1 'initialize' @{
         protocolVersion = '2025-11-25'
         capabilities = @{}
-        clientInfo = @{ name = 'rapid-pc-use-release-smoke'; version = '1' }
+        clientInfo = @{ name = 'rapid-pc-use-verification-smoke'; version = '1' }
     }
     $observe = Invoke-Mcp 2 'tools/call' @{
         name = 'pc_observe'

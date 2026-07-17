@@ -21,12 +21,12 @@ if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
 $sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash
 $sourceSignature = Get-AuthenticodeSignature -LiteralPath $sourceExe
 if ($sourceSignature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
-    Write-Warning 'This public-beta executable is not Authenticode-signed. Verify its SHA-256 and GitHub provenance before installation.'
+    Write-Warning 'This locally built public-beta executable is not Authenticode-signed. Install only from source you trust.'
 }
 
 $pluginParent = [IO.Path]::GetFullPath((Join-Path $HOME 'plugins'))
 $destination = [IO.Path]::GetFullPath((Join-Path $pluginParent 'rapid-pc-use'))
-if (-not $destination.StartsWith($pluginParent, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not $destination.StartsWith($pluginParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Refusing to install outside the personal plugin directory.'
 }
 
@@ -36,7 +36,16 @@ $staging = Join-Path $pluginParent ".rapid-pc-use.staging-$token"
 $backup = Join-Path $pluginParent ".rapid-pc-use.backup-$token"
 
 try {
-    Copy-Item -LiteralPath $sourcePlugin -Destination $staging -Recurse -Force
+    New-Item -ItemType Directory -Force $staging | Out-Null
+    foreach ($child in (Get-ChildItem -LiteralPath $sourcePlugin -Force)) {
+        if ($child.Name -eq 'bin') {
+            continue
+        }
+        Copy-Item -LiteralPath $child.FullName -Destination (Join-Path $staging $child.Name) -Recurse -Force
+    }
+    $stagedBin = Join-Path $staging 'bin'
+    New-Item -ItemType Directory -Force $stagedBin | Out-Null
+    Copy-Item -LiteralPath (Split-Path $sourceExe -Parent) -Destination (Join-Path $stagedBin 'win-x64') -Recurse -Force
     if (Test-Path -LiteralPath $destination) {
         Move-Item -LiteralPath $destination -Destination $backup
     }
@@ -58,7 +67,7 @@ finally {
 }
 
 # A unique build-metadata suffix makes the desktop refresh its cached local copy.
-$installTimestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+$installTimestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmssfff')
 $installedManifestPath = Join-Path $destination '.codex-plugin\plugin.json'
 $installedManifest = Get-Content -Raw -LiteralPath $installedManifestPath | ConvertFrom-Json
 $baseVersion = ([string]$installedManifest.version).Split('+')[0]
@@ -105,6 +114,7 @@ $marketplace.plugins = @($existing) + $entry
 
 # Prefer the Codex binary bundled with the desktop app. A separately installed
 # PATH CLI can be older and may not implement plugin commands yet.
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $codexCandidates = @()
 $desktopBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
 if (Test-Path -LiteralPath $desktopBin) {
@@ -135,7 +145,16 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Codex discovered the personal marketplace but failed to install rapid-pc-use.'
 }
 
-$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+$cachePlugin = Join-Path $codexHome "plugins\cache\personal\rapid-pc-use\$($installedManifest.version)"
+$cacheExe = Join-Path $cachePlugin 'bin\win-x64\rapid-pc-use.exe'
+if (-not (Test-Path -LiteralPath $cacheExe -PathType Leaf)) {
+    throw "Codex did not create the expected plugin cache: $cachePlugin"
+}
+$cacheExeHash = (Get-FileHash -LiteralPath $cacheExe -Algorithm SHA256).Hash
+if ($cacheExeHash -ne $sourceExeHash) {
+    throw 'The Codex plugin cache executable does not match the locally built executable.'
+}
+
 New-Item -ItemType Directory -Force $codexHome | Out-Null
 $configPath = Join-Path $codexHome 'config.toml'
 if (-not (Test-Path -LiteralPath $configPath)) {
@@ -189,6 +208,7 @@ When the user asks to operate the visible Windows desktop or any GUI app, use th
 
 Write-Host 'Rapid PC Use is installed and enabled.' -ForegroundColor Green
 Write-Host "Plugin: $destination"
+Write-Host "Codex cache: $cachePlugin"
 Write-Host "Marketplace: $marketplacePath"
 Write-Host "Driver SHA-256: $installedExeHash"
 if ($EnableFastMode) {

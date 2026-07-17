@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Rapid PC Use is currently a public beta. Security fixes are provided only for the newest published beta release.
+Rapid PC Use is currently a public beta. Security fixes are provided on the newest `main` revision.
 
 ## Reporting a vulnerability
 
@@ -14,4 +14,4 @@ Include the Rapid PC Use version, Windows version, reproduction steps, expected 
 
 Rapid PC Use intentionally sends real mouse and keyboard input to the interactive Windows session. It cannot cross the Windows secure desktop, lock or login screens, Ctrl+Alt+Delete, integrity-level boundaries into elevated applications, or application-specific input protections.
 
-Public-beta executables are not Authenticode-signed. Releases must instead be traceable to a GitHub-verified signed tag, protected CI, a published SHA-256, an SPDX SBOM, and GitHub build-provenance attestation. Treat SmartScreen warnings as expected beta behavior and never bypass a checksum or provenance mismatch.
+Public-beta executables are not Authenticode-signed. The supported installer builds from the checked-out source with a checksum-pinned Microsoft SDK, verifies the copied executable at each installation boundary, and relies on protected CI and signed Git history for repository integrity. Install only from the official repository or another source revision you have independently reviewed.
