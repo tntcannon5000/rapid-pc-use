@@ -3,10 +3,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using RapidPcUse.Agent;
 
 namespace RapidPcUse;
 
-internal sealed class McpServer(DesktopController desktop, TextReader input, TextWriter output)
+internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextReader input, TextWriter output)
 {
     private const string ServerName = "rapid-pc-use";
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -14,6 +15,11 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
     };
+    private static readonly string[] BeginControlRequired = ["begin_control"];
+    private readonly ContextTelemetry _contextTelemetry = new();
+    private long _toolSequence;
+    private long _lastToolResponseWrittenTimestamp;
+    private ToolTrace? _pendingToolTrace;
 
     internal void Run()
     {
@@ -43,8 +49,9 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
 
             try
             {
+                var requestReadTimestamp = Stopwatch.GetTimestamp();
                 using var request = JsonDocument.Parse(line);
-                HandleMessage(request.RootElement);
+                HandleMessage(request.RootElement, line.Length, requestReadTimestamp);
             }
             catch (Exception exception)
             {
@@ -54,7 +61,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
     }
 
-    private void HandleMessage(JsonElement request)
+    private void HandleMessage(JsonElement request, int requestCharacters, long requestReadTimestamp)
     {
         var hasId = request.TryGetProperty("id", out var id);
         if (hasId && !IsValidRequestId(id))
@@ -90,10 +97,15 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 "initialize" => Initialize(parameters),
                 "ping" => new Dictionary<string, object?>(),
                 "tools/list" => new Dictionary<string, object?> { ["tools"] = ToolDefinitions() },
-                "tools/call" => CallTool(parameters),
+                "tools/call" => CallTool(parameters, requestCharacters, requestReadTimestamp),
                 _ => throw new MethodNotFoundException(method),
             };
-            WriteResult(id, result);
+            var responseWriteTimestamp = Stopwatch.GetTimestamp();
+            var responseCharacters = WriteResult(id, result);
+            if (method == "tools/call")
+            {
+                CompleteToolResponseTrace(responseCharacters, responseWriteTimestamp);
+            }
         }
         catch (MethodNotFoundException exception)
         {
@@ -107,7 +119,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
     }
 
-    private static Dictionary<string, object?> Initialize(JsonElement parameters)
+    private Dictionary<string, object?> Initialize(JsonElement parameters)
     {
         var protocolVersion = parameters.ValueKind == JsonValueKind.Object &&
             parameters.TryGetProperty("protocolVersion", out var version) &&
@@ -128,11 +140,13 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 ["version"] = BuildInfo.Version,
                 ["description"] = "Fast native Windows screenshot, mouse, keyboard, and takeover control.",
             },
-            ["instructions"] = "Start with pc_observe(begin_control=true); capture without the visible control cue is not permitted. Use monitor-local normalized screenshot coordinates 0..1000. Each frame is valid for 30 seconds and one action batch. Native tool calls require user approval unless the user explicitly installed fast mode. Batch only deterministic actions. RAPID_PC_USE_FAILURE is terminal for the task: make no more PC or target-app actions, perform only the single bounded log read it requests, then give the user a brief plain-language summary without investigating. Physical Escape means the user took over; end the model turn immediately without reading logs.",
+            ["instructions"] = agent is null
+                ? "Use pc_observe/pc_act/pc_stop for visible Windows work. Capture requires the visible control cue. Physical Escape means the user took over; end the model turn immediately without reading logs. RAPID_PC_USE_FAILURE is terminal."
+                : "Prefer pc_run for visible Windows work; it preserves the same visible control cue and physical-Escape takeover while owning the fast visual action loop internally. Use pc_resume only after explicit user confirmation. Keep pc_observe/pc_act/pc_stop for diagnostics and fallback. Physical Escape returns immediately to the main Codex model; make no more PC calls in that turn. RAPID_PC_USE_FAILURE is terminal.",
         };
     }
 
-    private object CallTool(JsonElement parameters)
+    private object CallTool(JsonElement parameters, int requestCharacters, long requestReadTimestamp)
     {
         if (parameters.ValueKind != JsonValueKind.Object ||
             !parameters.TryGetProperty("name", out var nameElement) ||
@@ -142,7 +156,8 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
 
         var name = nameElement.GetString()!;
-        if (name is not ("pc_observe" or "pc_act" or "pc_stop"))
+        if (name is not ("pc_observe" or "pc_act" or "pc_stop" or "pc_run" or "pc_resume") ||
+            (name is "pc_run" or "pc_resume") && agent is null)
         {
             throw new MethodNotFoundException("Unknown tool.");
         }
@@ -151,6 +166,18 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             ? args
             : default;
         var operationId = DriverLog.NewOperationId("op");
+        var sequence = Interlocked.Increment(ref _toolSequence);
+        var priorResponseToRequestMicroseconds = _lastToolResponseWrittenTimestamp == 0
+            ? (long?)null
+            : ElapsedMicroseconds(_lastToolResponseWrittenTimestamp, requestReadTimestamp);
+        var trace = new ToolTrace(
+            sequence,
+            operationId,
+            name,
+            requestCharacters,
+            requestReadTimestamp,
+            priorResponseToRequestMicroseconds);
+        _pendingToolTrace = trace;
         var requestSummary = SafeRequestSummary(name, arguments);
         var stopwatch = Stopwatch.StartNew();
         DriverLog.Info(
@@ -158,7 +185,14 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             $"{name} started.",
             operationId: operationId,
             tool: name,
-            data: requestSummary);
+            data: new
+            {
+                sequence,
+                previous_response_to_request_us = priorResponseToRequestMicroseconds,
+                request_characters = requestCharacters,
+                request_read_to_dispatch_us = ElapsedMicroseconds(requestReadTimestamp),
+                request = requestSummary,
+            });
 
         try
         {
@@ -166,10 +200,13 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             {
                 "pc_observe" => Observe(arguments),
                 "pc_act" => Act(arguments),
+                "pc_run" => RunAgent(arguments),
+                "pc_resume" => ResumeAgent(arguments),
                 "pc_stop" => Stop(),
                 _ => throw new MethodNotFoundException("Unknown tool."),
             };
             stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
             DriverLog.Info(
                 "tool.completed",
                 $"{name} completed successfully.",
@@ -178,9 +215,55 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 data: new { elapsed_ms = stopwatch.ElapsedMilliseconds, request = requestSummary, result = outcome.LogData });
             return outcome.Result;
         }
-        catch (UserTakeoverException)
+        catch (PcActionPlanValidationException exception) when (name == "pc_act")
         {
             stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.action_rejected",
+                "pc_act rejected an invalid batch before native input; control and the current frame remain active.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    rejection = exception.SafeData(),
+                });
+            return ActionRejectedResult(exception);
+        }
+        catch (StaleFrameException) when (name == "pc_act")
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            var observation = desktop.Observe(beginControl: true);
+            _ = _contextTelemetry.Record(observation);
+            DriverLog.Warning(
+                "tool.frame_refreshed",
+                "pc_act received an unusable frame and refreshed it before native input.",
+                operationId: operationId,
+                tool: name,
+                data: new { elapsed_ms = stopwatch.ElapsedMilliseconds, new_frame_id = observation.FrameId });
+            var result = ObservationResult(observation);
+            ((List<object>)result["content"]!).Insert(0, new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = "PC_FRAME_REFRESHED: No action executed. Continue immediately using the fresh frame below.",
+            });
+            result["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "frame_refreshed",
+                ["frame_id"] = observation.FrameId,
+                ["no_actions_executed"] = true,
+                ["control_active"] = true,
+            };
+            return result;
+        }
+        catch (UserTakeoverException)
+        {
+            agent?.CancelPaused();
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
             DriverLog.Info(
                 "tool.user_takeover",
                 $"{name} ended because the user pressed physical Escape.",
@@ -194,6 +277,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         catch (Exception exception)
         {
             stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
             var failureId = DriverLog.NewOperationId("failure");
             var simpleSummary = PlainLanguageSummary(exception);
             DriverLog.Error(
@@ -208,6 +292,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             var released = true;
             try
             {
+                agent?.CancelPaused();
                 desktop.Stop();
                 DriverLog.Info(
                     "tool.failure_control_released",
@@ -241,7 +326,8 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
     {
         var beginControl = OptionalBoolean(arguments, "begin_control", true);
         var observation = desktop.Observe(beginControl);
-        return new ToolOutcome(ObservationResult(observation), ObservationLogData(observation));
+        var context = _contextTelemetry.Record(observation);
+        return new ToolOutcome(ObservationResult(observation), ObservationLogData(observation, context));
     }
 
     private ToolOutcome Act(JsonElement arguments)
@@ -249,34 +335,196 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         var frameId = RequiredInt64(arguments, "frame_id");
         if (!arguments.TryGetProperty("actions", out var actions))
         {
-            throw new ArgumentException("pc_act requires actions.");
+            throw new PcActionPlanValidationException(
+                "missing_actions",
+                "pc_act requires actions.",
+                "actions");
         }
 
         var settleMilliseconds = OptionalInteger(arguments, "settle_ms", 35);
         var observeAfter = OptionalBoolean(arguments, "observe_after", true);
-        var observation = desktop.Act(frameId, actions, settleMilliseconds, observeAfter);
-        return observation is null
+        var actResult = desktop.Act(frameId, actions, settleMilliseconds, observeAfter);
+        if (actResult.Failure is not null)
+        {
+            return CreateInterruptedActOutcome(actResult);
+        }
+
+        return actResult.Observation is null
             ? new ToolOutcome(
                 ToolText("Actions completed without observation. Use pc_observe before any coordinate-dependent action.", isError: false),
-                new { returned_frame = false })
-            : new ToolOutcome(ObservationResult(observation), ObservationLogData(observation));
+                ActionLogData(actResult, observationData: null))
+            : CreateObservedActOutcome(actResult);
+    }
+
+    private ToolOutcome RunAgent(JsonElement arguments)
+    {
+        var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
+        var request = ParseRunRequest(arguments, loop.Options);
+        var result = loop.Run(request);
+        return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
+    }
+
+    private ToolOutcome ResumeAgent(JsonElement arguments)
+    {
+        var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
+        var sessionId = RequiredBoundedString(arguments, "session_id", 128);
+        var confirmationId = RequiredBoundedString(arguments, "confirmation_id", 128);
+        var decision = RequiredBoundedString(arguments, "decision", 32);
+        if (decision is not ("approve_once" or "deny"))
+        {
+            throw new ArgumentException("decision must be approve_once or deny.");
+        }
+
+        var result = loop.Resume(sessionId, confirmationId, decision == "approve_once");
+        return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
     }
 
     private ToolOutcome Stop()
     {
+        var contextSummary = _contextTelemetry.Snapshot();
+        agent?.CancelPaused();
         desktop.Stop();
+        _contextTelemetry.Reset();
         return new ToolOutcome(
             ToolText("PC control ended. The native mouse and keyboard are released.", isError: false),
-            new { control_active = false });
+            new { control_active = false, context_session = contextSummary });
     }
 
-    private static object ObservationLogData(Observation observation) => new
+    private static object AgentResultLogData(PcRunResult result) => new
+    {
+        status = result.Status.ToString().ToLowerInvariant(),
+        model_turns = result.ModelTurns,
+        actions_executed = result.ActionsExecuted,
+        elapsed_ms = result.ElapsedMilliseconds,
+        confirmation_requested = result.Confirmation is not null,
+        returned_final_frame = result.FinalObservation is not null,
+    };
+
+    private static Dictionary<string, object?> AgentResult(PcRunResult result)
+    {
+        var status = AgentStatusName(result.Status);
+        var structured = new Dictionary<string, object?>
+        {
+            ["status"] = status,
+            ["sessionId"] = result.SessionId,
+            ["summary"] = result.Summary,
+            ["modelTurns"] = result.ModelTurns,
+            ["actionsExecuted"] = result.ActionsExecuted,
+            ["elapsedMs"] = result.ElapsedMilliseconds,
+            ["telemetrySessionId"] = result.TelemetrySessionId,
+            ["confirmation"] = result.Confirmation is null
+                ? null
+                : new Dictionary<string, object?>
+                {
+                    ["confirmationId"] = result.Confirmation.ConfirmationId,
+                    ["operationSummary"] = result.Confirmation.OperationSummary,
+                    ["risk"] = PcAgentDecisionParser.RiskName(result.Confirmation.Risk),
+                    ["expiresAt"] = result.Confirmation.ExpiresUtc.ToString("O"),
+                },
+        };
+        var message = result.Status == PcAgentStatus.NeedsConfirmation && result.Confirmation is not null
+            ? $"PC_RUN_NEEDS_CONFIRMATION: {result.Confirmation.OperationSummary} Ask the user in the main Codex conversation. If approved, call pc_resume with session_id '{result.SessionId}', confirmation_id '{result.Confirmation.ConfirmationId}', and decision 'approve_once'; otherwise use decision 'deny'."
+            : $"PC_RUN_{status.ToUpperInvariant()}: {result.Summary}";
+        var content = new List<object>
+        {
+            new Dictionary<string, object?> { ["type"] = "text", ["text"] = message },
+        };
+
+        if (result.FinalObservation is not null)
+        {
+            foreach (var item in (IEnumerable<object>)ObservationResult(result.FinalObservation)["content"]!)
+            {
+                content.Add(item);
+            }
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["content"] = content,
+            ["structuredContent"] = structured,
+            ["isError"] = false,
+        };
+    }
+
+    private static string AgentStatusName(PcAgentStatus status) => status switch
+    {
+        PcAgentStatus.Completed => "completed",
+        PcAgentStatus.NeedsConfirmation => "needs_confirmation",
+        PcAgentStatus.Blocked => "blocked",
+        PcAgentStatus.LimitReached => "limit_reached",
+        PcAgentStatus.Failed => "failed",
+        PcAgentStatus.Denied => "denied",
+        PcAgentStatus.UserTakeover => "user_takeover",
+        _ => "failed",
+    };
+
+    private ToolOutcome CreateObservedActOutcome(DesktopActResult actResult)
+    {
+        var observation = actResult.Observation!;
+        var context = _contextTelemetry.Record(observation);
+        var observationData = ObservationLogData(observation, context);
+        return new ToolOutcome(
+            ObservationResult(observation),
+            ActionLogData(actResult, observationData));
+    }
+
+    private ToolOutcome CreateInterruptedActOutcome(DesktopActResult result)
+    {
+        var failure = result.Failure ?? throw new InvalidOperationException("Interrupted action result is missing failure data.");
+        var structured = new Dictionary<string, object?>
+        {
+            ["status"] = "action_interrupted",
+            ["action_index"] = failure.ActionIndex,
+            ["action_type"] = failure.ActionType,
+            ["completed_actions"] = failure.CompletedActions,
+            ["control_active"] = result.Observation?.ControlActive ?? true,
+            ["frame_id"] = result.Observation?.FrameId,
+        };
+        var text = $"PC_ACTION_INTERRUPTED: {failure.SafeSummary} Earlier completed actions: {failure.CompletedActions}. " +
+            "Control remains active; inspect the returned screenshot and continue from the visible state.";
+        var payload = ToolText(text, isError: false);
+        payload["structuredContent"] = structured;
+        if (result.Observation is not null)
+        {
+            var observationContent = (IEnumerable<object>)ObservationResult(result.Observation)["content"]!;
+            ((List<object>)payload["content"]!).AddRange(observationContent);
+        }
+
+        return new ToolOutcome(payload, ActionLogData(result, result.Observation is null ? null : ObservationLogData(result.Observation, _contextTelemetry.Record(result.Observation))));
+    }
+
+    private static object ActionLogData(DesktopActResult result, object? observationData) => new
+    {
+        returned_frame = result.Observation is not null,
+        action_execution_us = result.Actions.Sum(action => action.ElapsedMicroseconds),
+        actions = result.Actions,
+        settle_requested_ms = result.SettleRequestedMilliseconds,
+        settle_elapsed_us = result.SettleElapsedMicroseconds,
+        interrupted = result.Failure is not null,
+        completed_actions = result.Failure?.CompletedActions,
+        observation = observationData,
+    };
+
+    private static object ObservationLogData(Observation observation, ContextObservationMetric context) => new
     {
         frame_id = observation.FrameId,
         control_active = observation.ControlActive,
         display_count = observation.Frames.Count,
         total_capture_ms = observation.TotalMilliseconds,
         encoded_bytes = observation.Frames.Sum(frame => frame.Bytes.Length),
+        estimated_32px_patches = observation.Frames.Sum(frame => ContextTelemetry.Estimate32PixelPatches(frame.EncodedWidth, frame.EncodedHeight)),
+        displays = observation.Frames.Select(frame => new
+        {
+            display_id = frame.Monitor.Id,
+            native_size_px = new[] { frame.Monitor.Width, frame.Monitor.Height },
+            encoded_size_px = new[] { frame.EncodedWidth, frame.EncodedHeight },
+            encoded_bytes = frame.Bytes.Length,
+            aspect_class = frame.Resolution.AspectClass,
+            short_edge_tier = frame.Resolution.ShortEdgeTier,
+            resized = frame.Resolution.Resized,
+            stages_us = frame.Timings,
+        }).ToArray(),
+        context,
     };
 
     private static Dictionary<string, object?> ObservationResult(Observation observation)
@@ -329,8 +577,10 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         };
     }
 
-    private static IReadOnlyList<object> ToolDefinitions() =>
-    [
+    private List<object> ToolDefinitions()
+    {
+        var tools = new List<object>
+        {
         new Dictionary<string, object?>
         {
             ["name"] = "pc_observe",
@@ -347,7 +597,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                         ["description"] = "Required. Acquire PC control and show the control overlay.",
                     },
                 },
-                ["required"] = new[] { "begin_control" },
+                ["required"] = BeginControlRequired,
                 ["additionalProperties"] = false,
             },
             ["annotations"] = new Dictionary<string, object?>
@@ -362,7 +612,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         new Dictionary<string, object?>
         {
             ["name"] = "pc_act",
-            ["description"] = "Execute one bounded batch of real native Windows input, consuming the latest unexpired frame_id, then optionally return fresh screenshots. The client prompts for approval unless fast mode was explicitly enabled. Physical Escape immediately cancels and releases held inputs.",
+            ["description"] = "Execute one bounded batch of real native Windows input, consuming the latest unexpired frame_id only after the complete batch validates, then optionally return fresh screenshots. Invalid batches execute nothing and return PC_ACTION_REJECTED with correction data; retry the same frame_id while it remains valid. The client prompts for approval unless fast mode was explicitly enabled. Physical Escape immediately cancels and releases held inputs.",
             ["inputSchema"] = ActSchema(),
             ["annotations"] = new Dictionary<string, object?>
             {
@@ -392,7 +642,133 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                 ["openWorldHint"] = false,
             },
         },
-    ];
+        };
+
+        if (agent is not null)
+        {
+            tools.Insert(0, AgentRunDefinition(agent.Options));
+            tools.Insert(1, AgentResumeDefinition());
+        }
+
+        return tools;
+    }
+
+    private static Dictionary<string, object?> AgentRunDefinition(PcAgentOptions options) => new()
+    {
+        ["name"] = "pc_run",
+        ["description"] = "Complete a visible Windows task through the same Rapid PC Use border and physical-Escape takeover, while an internal bounded visual agent owns the fast screenshot/action loop. Use this by default. Translate only explicit user authority into scope flags. Returns once on completion, takeover, a blocker, a limit, or a confirmation boundary.",
+        ["inputSchema"] = new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?>
+            {
+                ["task"] = new Dictionary<string, object?>
+                {
+                    ["type"] = "string",
+                    ["minLength"] = 1,
+                    ["maxLength"] = SecurityLimits.MaxAgentTaskCharacters,
+                    ["description"] = "The user's requested visible-PC outcome. Do not add authority that the user did not give.",
+                },
+                ["scope"] = AgentScopeSchema(),
+                ["limits"] = new Dictionary<string, object?>
+                {
+                    ["type"] = "object",
+                    ["description"] = "Optional shorter run budgets. Omit for configured defaults. Integer values outside the advertised range are normalized to the nearest supported bound so a harmless budget mismatch never aborts desktop work.",
+                    ["properties"] = new Dictionary<string, object?>
+                    {
+                        ["max_model_turns"] = IntegerSchema(1, options.MaxModelTurns, "Maximum internal visual decisions."),
+                        ["max_actions"] = IntegerSchema(1, options.MaxActions, "Maximum native actions across the run."),
+                        ["max_duration_ms"] = IntegerSchema(10_000, options.MaxDurationMilliseconds, "Maximum wall-clock duration in milliseconds."),
+                        ["max_consecutive_no_progress_turns"] = IntegerSchema(1, options.MaxConsecutiveNoProgressTurns, "Maximum unchanged turns before internal recovery."),
+                    },
+                    ["additionalProperties"] = false,
+                },
+                ["return_final_screenshot"] = new Dictionary<string, object?>
+                {
+                    ["type"] = "boolean",
+                    ["description"] = "Diagnostics only. Default false so the outer Codex context stays compact.",
+                },
+            },
+            ["required"] = new[] { "task" },
+            ["additionalProperties"] = false,
+        },
+        ["annotations"] = new Dictionary<string, object?>
+        {
+            ["title"] = "Operate Windows",
+            ["readOnlyHint"] = false,
+            ["destructiveHint"] = true,
+            ["idempotentHint"] = false,
+            ["openWorldHint"] = true,
+        },
+    };
+
+    private static Dictionary<string, object?> AgentResumeDefinition() => new()
+    {
+        ["name"] = "pc_resume",
+        ["description"] = "Resume the one paused pc_run only after the main Codex model receives an explicit user decision for the exact pending confirmation. Physical Escape retains its normal immediate takeover behavior.",
+        ["inputSchema"] = new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?>
+            {
+                ["session_id"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = 128 },
+                ["confirmation_id"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = 128 },
+                ["decision"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new[] { "approve_once", "deny" } },
+            },
+            ["required"] = new[] { "session_id", "confirmation_id", "decision" },
+            ["additionalProperties"] = false,
+        },
+        ["annotations"] = new Dictionary<string, object?>
+        {
+            ["title"] = "Resume Windows task",
+            ["readOnlyHint"] = false,
+            ["destructiveHint"] = true,
+            ["idempotentHint"] = false,
+            ["openWorldHint"] = true,
+        },
+    };
+
+    private static Dictionary<string, object?> AgentScopeSchema() => new()
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["allowed_processes"] = new Dictionary<string, object?>
+            {
+                ["type"] = "array",
+                ["maxItems"] = SecurityLimits.MaxAgentAllowedProcesses,
+                ["items"] = new Dictionary<string, object?>
+                {
+                    ["type"] = "string",
+                    ["maxLength"] = SecurityLimits.MaxAgentProcessNameCharacters,
+                },
+            },
+            ["allow_external_communication"] = BooleanSchema(),
+            ["allow_local_deletion"] = BooleanSchema(),
+            ["allow_credentials"] = BooleanSchema(),
+            ["allow_purchases"] = BooleanSchema(),
+            ["allow_account_or_permission_changes"] = BooleanSchema(),
+        },
+        ["additionalProperties"] = false,
+    };
+
+    private static Dictionary<string, object?> BooleanSchema() => new() { ["type"] = "boolean" };
+
+    private static Dictionary<string, object?> IntegerSchema(int minimum, int maximum, string? description = null)
+    {
+        var schema = new Dictionary<string, object?>
+        {
+            ["type"] = "integer",
+            ["minimum"] = minimum,
+            ["maximum"] = maximum,
+        };
+        if (description is not null)
+        {
+            schema["description"] = description;
+        }
+
+        return schema;
+    }
 
     private static Dictionary<string, object?> ActSchema()
     {
@@ -401,22 +777,54 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
             ["type"] = new Dictionary<string, object?>
             {
                 ["type"] = "string",
-                ["enum"] = new[] { "move", "relative_move", "click", "mouse_down", "mouse_up", "drag", "scroll", "type", "key", "key_down", "key_up", "wait" },
+                ["enum"] = new[] { "move", "click", "double_click", "drag", "scroll", "type", "key", "wait" },
             },
             ["display_id"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "Display ID from the latest observation." },
-            ["x"] = CoordinateSchema("X coordinate 0..1000 in the selected display image, or relative delta for relative_move."),
-            ["y"] = CoordinateSchema("Y coordinate 0..1000 in the selected display image, or relative delta for relative_move."),
+            ["x"] = CoordinateSchema("X coordinate 0..1000 in the selected display image."),
+            ["y"] = CoordinateSchema("Y coordinate 0..1000 in the selected display image."),
             ["to_x"] = CoordinateSchema("Drag destination X, 0..1000."),
             ["to_y"] = CoordinateSchema("Drag destination Y, 0..1000."),
             ["button"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new[] { "left", "right", "middle", "x1", "x2" } },
             ["count"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 3 },
             ["duration_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxDragMilliseconds },
-            ["scroll_y"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = -100, ["maximum"] = 100, ["description"] = "Wheel ticks; positive scrolls down, negative up." },
-            ["scroll_x"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = -100, ["maximum"] = 100, ["description"] = "Wheel ticks; positive scrolls right, negative left." },
+            ["scroll_y"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native vertical scroll delta. Positive scrolls down and negative scrolls up; roughly 100 units become one Windows wheel notch." },
+            ["scroll_x"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native horizontal scroll delta. Positive scrolls right and negative scrolls left; roughly 100 units become one Windows wheel notch." },
             ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxTypedCodeUnitsPerAction, ["description"] = "Literal text typed as Unicode keystrokes, never clipboard paste." },
             ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; default 2 ms." },
             ["keys"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxKeyChordCharacters, ["description"] = "Key or '+'-joined chord, e.g. CTRL+L, ENTER, ALT+F4." },
             ["ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds },
+        };
+
+        Dictionary<string, object?> ActionVariant(string type, params string[] fields)
+        {
+            var properties = fields.Prepend("type").ToDictionary(
+                name => name,
+                name => name == "type"
+                    ? (object?)new Dictionary<string, object?> { ["type"] = "string", ["const"] = type }
+                    : actionProperties[name],
+                StringComparer.Ordinal);
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "object",
+                ["properties"] = properties,
+                ["required"] = fields.Prepend("type").ToArray(),
+                ["additionalProperties"] = false,
+            };
+        }
+
+        var actionSchema = new Dictionary<string, object?>
+        {
+            ["oneOf"] = new object[]
+            {
+                ActionVariant("move", "display_id", "x", "y"),
+                ActionVariant("click", "display_id", "x", "y", "button", "count"),
+                ActionVariant("double_click", "display_id", "x", "y", "button"),
+                ActionVariant("drag", "display_id", "x", "y", "to_x", "to_y", "duration_ms", "button"),
+                ActionVariant("scroll", "display_id", "x", "y", "scroll_y", "scroll_x"),
+                ActionVariant("type", "text", "interval_ms"),
+                ActionVariant("key", "keys"),
+                ActionVariant("wait", "ms"),
+            },
         };
 
         return new Dictionary<string, object?>
@@ -430,13 +838,7 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
                     ["type"] = "array",
                     ["minItems"] = 1,
                     ["maxItems"] = SecurityLimits.MaxActionsPerBatch,
-                    ["items"] = new Dictionary<string, object?>
-                    {
-                        ["type"] = "object",
-                        ["properties"] = actionProperties,
-                        ["required"] = new[] { "type" },
-                        ["additionalProperties"] = false,
-                    },
+                    ["items"] = actionSchema,
                 },
                 ["settle_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds, ["description"] = "Short repaint delay after the batch; default 35 ms." },
                 ["observe_after"] = new Dictionary<string, object?> { ["type"] = "boolean", ["description"] = "Return fresh screenshots in this same call; default true." },
@@ -449,13 +851,181 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
     private static Dictionary<string, object?> CoordinateSchema(string description) => new()
     {
         ["type"] = "integer",
-        ["minimum"] = -32768,
-        ["maximum"] = 32767,
+        ["minimum"] = 0,
+        ["maximum"] = 1000,
         ["description"] = description,
     };
 
+    private static PcRunRequest ParseRunRequest(JsonElement arguments, PcAgentOptions options)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("pc_run arguments must be an object.");
+        }
+
+        var task = RequiredBoundedString(arguments, "task", SecurityLimits.MaxAgentTaskCharacters);
+        if (string.IsNullOrWhiteSpace(task))
+        {
+            throw new ArgumentException("task must not be empty.");
+        }
+
+        var scopeElement = arguments.TryGetProperty("scope", out var scopeValue)
+            ? RequireObject(scopeValue, "scope")
+            : default;
+        var allowedProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (scopeElement.ValueKind == JsonValueKind.Object && scopeElement.TryGetProperty("allowed_processes", out var processes))
+        {
+            if (processes.ValueKind != JsonValueKind.Array || processes.GetArrayLength() > SecurityLimits.MaxAgentAllowedProcesses)
+            {
+                throw new ArgumentException("allowed_processes must be a bounded array.");
+            }
+
+            foreach (var process in processes.EnumerateArray())
+            {
+                if (process.ValueKind != JsonValueKind.String)
+                {
+                    throw new ArgumentException("allowed_processes entries must be strings.");
+                }
+
+                allowedProcesses.Add(ActionPolicy.NormalizeProcessName(process.GetString()!));
+            }
+        }
+
+        var scope = new PcRunScope(
+            allowedProcesses,
+            StrictOptionalBoolean(scopeElement, "allow_external_communication", false),
+            StrictOptionalBoolean(scopeElement, "allow_local_deletion", false),
+            StrictOptionalBoolean(scopeElement, "allow_credentials", false),
+            StrictOptionalBoolean(scopeElement, "allow_purchases", false),
+            StrictOptionalBoolean(scopeElement, "allow_account_or_permission_changes", false));
+
+        var limitsElement = arguments.TryGetProperty("limits", out var limitsValue)
+            ? RequireObject(limitsValue, "limits")
+            : default;
+        var limits = new PcRunLimits(
+            NormalizedOptionalInteger(limitsElement, "max_model_turns", options.MaxModelTurns, 1, options.MaxModelTurns),
+            NormalizedOptionalInteger(limitsElement, "max_actions", options.MaxActions, 1, options.MaxActions),
+            NormalizedOptionalInteger(limitsElement, "max_duration_ms", options.MaxDurationMilliseconds, 10_000, options.MaxDurationMilliseconds),
+            NormalizedOptionalInteger(
+                limitsElement,
+                "max_consecutive_no_progress_turns",
+                options.MaxConsecutiveNoProgressTurns,
+                1,
+                options.MaxConsecutiveNoProgressTurns));
+
+        return new PcRunRequest(
+            task,
+            scope,
+            limits,
+            StrictOptionalBoolean(arguments, "return_final_screenshot", false));
+    }
+
+    private static JsonElement RequireObject(JsonElement value, string property)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException($"{property} must be an object.");
+        }
+
+        return value;
+    }
+
+    private static bool StrictOptionalBoolean(JsonElement value, string property, bool fallback)
+    {
+        if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(property, out var element))
+        {
+            return fallback;
+        }
+
+        if (element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new ArgumentException($"{property} must be a boolean.");
+        }
+
+        return element.GetBoolean();
+    }
+
+    private static int NormalizedOptionalInteger(
+        JsonElement value,
+        string property,
+        int fallback,
+        int minimum,
+        int maximum)
+    {
+        if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(property, out var element))
+        {
+            return fallback;
+        }
+
+        if (!element.TryGetInt64(out var requested))
+        {
+            throw new ArgumentException($"{property} must be an integer.");
+        }
+
+        return (int)Math.Clamp(requested, minimum, maximum);
+    }
+
+    private static string RequiredBoundedString(JsonElement value, string property, int maximumLength)
+    {
+        if (value.ValueKind != JsonValueKind.Object ||
+            !value.TryGetProperty(property, out var element) ||
+            element.ValueKind != JsonValueKind.String)
+        {
+            throw new ArgumentException($"{property} must be a string.");
+        }
+
+        var result = element.GetString()!;
+        if (result.Length > maximumLength)
+        {
+            throw new ArgumentException($"{property} exceeds its maximum length.");
+        }
+
+        return result;
+    }
+
     private static object SafeRequestSummary(string tool, JsonElement arguments)
     {
+        if (tool == "pc_run")
+        {
+            var scope = arguments.ValueKind == JsonValueKind.Object &&
+                        arguments.TryGetProperty("scope", out var scopeValue) &&
+                        scopeValue.ValueKind == JsonValueKind.Object
+                ? scopeValue
+                : default;
+            var processCount = scope.ValueKind == JsonValueKind.Object &&
+                               scope.TryGetProperty("allowed_processes", out var processes) &&
+                               processes.ValueKind == JsonValueKind.Array
+                ? Math.Min(processes.GetArrayLength(), SecurityLimits.MaxAgentAllowedProcesses)
+                : 0;
+            return new
+            {
+                task_characters = arguments.ValueKind == JsonValueKind.Object &&
+                                  arguments.TryGetProperty("task", out var task) &&
+                                  task.ValueKind == JsonValueKind.String
+                    ? Math.Min(task.GetString()?.Length ?? 0, SecurityLimits.MaxAgentTaskCharacters + 1)
+                    : 0,
+                allowed_process_count = processCount,
+                allow_external_communication = OptionalBoolean(scope, "allow_external_communication", false),
+                allow_local_deletion = OptionalBoolean(scope, "allow_local_deletion", false),
+                requested_limits = SafeRequestedLimits(arguments),
+                privacy = "Task, process names, and other literal scope content omitted.",
+            };
+        }
+
+        if (tool == "pc_resume")
+        {
+            return new
+            {
+                decision = arguments.ValueKind == JsonValueKind.Object &&
+                           arguments.TryGetProperty("decision", out var decision) &&
+                           decision.ValueKind == JsonValueKind.String &&
+                           decision.GetString() is "approve_once" or "deny"
+                    ? decision.GetString()
+                    : "invalid",
+                privacy = "Session and confirmation IDs omitted.",
+            };
+        }
+
         if (tool == "pc_observe")
         {
             return new { begin_control = OptionalBoolean(arguments, "begin_control", true) };
@@ -516,6 +1086,29 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         };
     }
 
+    private static object SafeRequestedLimits(JsonElement arguments)
+    {
+        var limits = arguments.ValueKind == JsonValueKind.Object &&
+                     arguments.TryGetProperty("limits", out var limitsValue) &&
+                     limitsValue.ValueKind == JsonValueKind.Object
+            ? limitsValue
+            : default;
+        return new
+        {
+            max_model_turns = OptionalInt64(limits, "max_model_turns"),
+            max_actions = OptionalInt64(limits, "max_actions"),
+            max_duration_ms = OptionalInt64(limits, "max_duration_ms"),
+            max_consecutive_no_progress_turns = OptionalInt64(limits, "max_consecutive_no_progress_turns"),
+        };
+    }
+
+    private static long? OptionalInt64(JsonElement value, string property)
+        => value.ValueKind == JsonValueKind.Object &&
+           value.TryGetProperty(property, out var element) &&
+           element.TryGetInt64(out var result)
+            ? result
+            : null;
+
     private static string PlainLanguageSummary(Exception exception)
     {
         var chain = ExceptionChain(exception).ToArray();
@@ -551,6 +1144,40 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
 
         return "Rapid PC Use could not complete the requested desktop operation.";
+    }
+
+    private static Dictionary<string, object?> ActionRejectedResult(PcActionPlanValidationException exception)
+    {
+        var location = exception.ActionIndex.HasValue
+            ? $" Action {exception.ActionIndex.Value}{(string.IsNullOrWhiteSpace(exception.ActionType) ? string.Empty : $" ({exception.ActionType})")}."
+            : string.Empty;
+        var retry = exception.AllowedMinimum.HasValue && exception.AllowedMaximum.HasValue && exception.Field is not null
+            ? $" Retry with '{exception.Field}' between {exception.AllowedMinimum.Value} and {exception.AllowedMaximum.Value}."
+            : " Correct the request and retry.";
+        var text = $"PC_ACTION_REJECTED: {exception.SafeMessage}{location}{retry} No actions executed; the frame was not consumed and PC control remains active.";
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?> { ["type"] = "text", ["text"] = text },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "action_rejected",
+                ["retryable"] = true,
+                ["no_actions_executed"] = true,
+                ["frame_consumed"] = false,
+                ["control_active"] = true,
+                ["code"] = exception.Code,
+                ["action_index"] = exception.ActionIndex,
+                ["action_type"] = exception.ActionType,
+                ["field"] = exception.Field,
+                ["supplied_value"] = exception.SuppliedValue,
+                ["allowed_minimum"] = exception.AllowedMinimum,
+                ["allowed_maximum"] = exception.AllowedMaximum,
+            },
+            ["isError"] = false,
+        };
     }
 
     private static IEnumerable<Exception> ExceptionChain(Exception exception)
@@ -645,9 +1272,9 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         }
     }
 
-    private void WriteResult(JsonElement id, object result)
+    private int WriteResult(JsonElement id, object result)
     {
-        Write(new Dictionary<string, object?>
+        return Write(new Dictionary<string, object?>
         {
             ["jsonrpc"] = "2.0",
             ["id"] = JsonSerializer.Deserialize<object>(id.GetRawText()),
@@ -665,11 +1292,49 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         });
     }
 
-    private void Write(object message)
+    private int Write(object message)
     {
-        output.WriteLine(JsonSerializer.Serialize(message, SerializerOptions));
+        var serialized = JsonSerializer.Serialize(message, SerializerOptions);
+        output.WriteLine(serialized);
         output.Flush();
+        return serialized.Length + Environment.NewLine.Length;
     }
+
+    private void CompleteToolResponseTrace(int responseCharacters, long responseWriteTimestamp)
+    {
+        var trace = _pendingToolTrace;
+        if (trace is null)
+        {
+            return;
+        }
+
+        var responseWrittenTimestamp = Stopwatch.GetTimestamp();
+        DriverLog.Info(
+            "mcp.response_written",
+            $"{trace.Tool} response was serialized and written to the MCP client.",
+            operationId: trace.OperationId,
+            tool: trace.Tool,
+            data: new
+            {
+                sequence = trace.Sequence,
+                request_characters = trace.RequestCharacters,
+                response_characters = responseCharacters,
+                previous_response_to_request_us = trace.PreviousResponseToRequestMicroseconds,
+                request_to_response_us = ElapsedMicroseconds(trace.RequestReadTimestamp, responseWrittenTimestamp),
+                tool_complete_to_response_us = trace.ToolCompletedTimestamp == 0
+                    ? (long?)null
+                    : ElapsedMicroseconds(trace.ToolCompletedTimestamp, responseWrittenTimestamp),
+                response_serialize_write_us = ElapsedMicroseconds(responseWriteTimestamp, responseWrittenTimestamp),
+            });
+        _lastToolResponseWrittenTimestamp = responseWrittenTimestamp;
+        _pendingToolTrace = null;
+    }
+
+    private static long ElapsedMicroseconds(long startTimestamp)
+        => (long)(Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds * 1000);
+
+    private static long ElapsedMicroseconds(long startTimestamp, long endTimestamp)
+        => (long)(Stopwatch.GetElapsedTime(startTimestamp, endTimestamp).TotalMilliseconds * 1000);
 
     private sealed class MethodNotFoundException(string message) : Exception(message);
 
@@ -677,6 +1342,23 @@ internal sealed class McpServer(DesktopController desktop, TextReader input, Tex
         : Exception("The JSON-RPC message exceeded the configured character limit.");
 
     private sealed record ToolOutcome(object Result, object? LogData);
+
+    private sealed class ToolTrace(
+        long sequence,
+        string operationId,
+        string tool,
+        int requestCharacters,
+        long requestReadTimestamp,
+        long? previousResponseToRequestMicroseconds)
+    {
+        internal long Sequence { get; } = sequence;
+        internal string OperationId { get; } = operationId;
+        internal string Tool { get; } = tool;
+        internal int RequestCharacters { get; } = requestCharacters;
+        internal long RequestReadTimestamp { get; } = requestReadTimestamp;
+        internal long? PreviousResponseToRequestMicroseconds { get; } = previousResponseToRequestMicroseconds;
+        internal long ToolCompletedTimestamp { get; set; }
+    }
 
     private static readonly HashSet<string> KnownActionTypes = new(StringComparer.Ordinal)
     {

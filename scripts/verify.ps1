@@ -8,6 +8,7 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $productProject = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
 $probeProject = Join-Path $root 'tools\InputApiProbe\InputApiProbe.csproj'
 $securityTestsProject = Join-Path $root 'tests\RapidPcUse.SecurityTests\RapidPcUse.SecurityTests.csproj'
+$agentTestsProject = Join-Path $root 'tests\RapidPcUse.AgentTests\RapidPcUse.AgentTests.csproj'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
@@ -39,14 +40,14 @@ if ($null -eq $dotnet) {
     throw "The pinned .NET SDK $sdkVersion was not found after the build."
 }
 
-foreach ($project in @($productProject, $probeProject, $securityTestsProject)) {
+foreach ($project in @($productProject, $probeProject, $securityTestsProject, $agentTestsProject)) {
     & $dotnet build $project -c Release --nologo -p:AnalysisLevel=latest-recommended
     if ($LASTEXITCODE -ne 0) {
         throw "Strict analyzer build failed: $project"
     }
 }
 
-foreach ($project in @($productProject, $probeProject, $securityTestsProject)) {
+foreach ($project in @($productProject, $probeProject, $securityTestsProject, $agentTestsProject)) {
     & $dotnet format $project --verify-no-changes --no-restore --verbosity minimal
     if ($LASTEXITCODE -ne 0) {
         throw "Formatting verification failed: $project"
@@ -56,6 +57,11 @@ foreach ($project in @($productProject, $probeProject, $securityTestsProject)) {
 & $dotnet run --project $securityTestsProject -c Release --no-build
 if ($LASTEXITCODE -ne 0) {
     throw 'Security regression tests failed.'
+}
+
+& $dotnet run --project $agentTestsProject -c Release --no-build
+if ($LASTEXITCODE -ne 0) {
+    throw 'PC agent regression tests failed.'
 }
 
 $parseErrors = @()

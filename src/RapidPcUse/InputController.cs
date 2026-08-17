@@ -308,7 +308,23 @@ internal sealed class InputController
         return (monitor.Left + localX, monitor.Top + localY);
     }
 
-    private static string CanonicalButton(string button) => button.Trim().ToLowerInvariant() switch
+    internal static void ValidateChord(string chord)
+    {
+        var tokens = chord.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0)
+        {
+            throw new ArgumentException("key chord cannot be empty.");
+        }
+
+        foreach (var token in tokens)
+        {
+            _ = KeyTokenToVirtualKey(token);
+        }
+    }
+
+    internal static void ValidateKey(string key) => _ = KeyTokenToVirtualKey(key);
+
+    internal static string CanonicalButton(string button) => button.Trim().ToLowerInvariant() switch
     {
         "left" or "l" => "left",
         "right" or "r" => "right",

@@ -62,7 +62,7 @@ internal sealed class ControlSessionState(TimeProvider? timeProvider = null)
     {
         lock (_gate)
         {
-            ThrowIfInactive();
+            ThrowIfInactiveCore();
             _lastActivityUtc = _timeProvider.GetUtcNow();
             return new ControlOperationLease(_generation, _lastActivityUtc + maximumDuration);
         }
@@ -86,6 +86,14 @@ internal sealed class ControlSessionState(TimeProvider? timeProvider = null)
             {
                 throw new TimeoutException("The desktop action exceeded the 30-second safety budget.");
             }
+        }
+    }
+
+    internal void ThrowIfInactive()
+    {
+        lock (_gate)
+        {
+            ThrowIfInactiveCore();
         }
     }
 
@@ -121,7 +129,7 @@ internal sealed class ControlSessionState(TimeProvider? timeProvider = null)
         }
     }
 
-    private void ThrowIfInactive()
+    private void ThrowIfInactiveCore()
     {
         if (_interrupted)
         {

@@ -16,12 +16,12 @@ internal interface IScreenCaptureBackend
 
 internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
 {
-    private readonly int _maxEdge;
+    private readonly CaptureTier _captureTier;
     private readonly int _jpegQuality;
 
     internal GdiScreenCaptureBackend()
     {
-        _maxEdge = ReadBoundedEnvironmentInteger("RAPID_PC_MAX_EDGE", 1920, 640, 6000);
+        _captureTier = CaptureResolutionPolicy.ReadEnvironmentTier();
         _jpegQuality = ReadBoundedEnvironmentInteger("RAPID_PC_JPEG_QUALITY", 84, 35, 100);
     }
 
@@ -69,6 +69,7 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
     private ScreenFrame CaptureMonitor(long frameId, MonitorDescriptor monitor)
     {
         var stopwatch = Stopwatch.StartNew();
+        var stageTimestamp = Stopwatch.GetTimestamp();
         var screenDc = NativeMethods.GetDC(0);
         if (screenDc == 0)
         {
@@ -87,6 +88,9 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to allocate the screenshot surface.");
             }
 
+            var surfaceSetupMicroseconds = ElapsedMicroseconds(stageTimestamp);
+
+            stageTimestamp = Stopwatch.GetTimestamp();
             oldObject = NativeMethods.SelectObject(memoryDc, bitmap);
             if (!NativeMethods.BitBlt(
                 memoryDc,
@@ -102,19 +106,30 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "BitBlt screenshot capture failed.");
             }
 
-            DrawCursor(memoryDc, monitor);
+            var blitMicroseconds = ElapsedMicroseconds(stageTimestamp);
+
+            stageTimestamp = Stopwatch.GetTimestamp();
             var source = Imaging.CreateBitmapSourceFromHBitmap(
                 bitmap,
                 0,
                 Int32Rect.Empty,
                 BitmapSizeOptions.FromEmptyOptions());
             source.Freeze();
+            var materializeMicroseconds = ElapsedMicroseconds(stageTimestamp);
 
-            var encodedSource = Resize(source, _maxEdge);
+            stageTimestamp = Stopwatch.GetTimestamp();
+            var resolution = CaptureResolutionPolicy.Select(source.PixelWidth, source.PixelHeight, _captureTier);
+            var encodedSource = Resize(source, resolution);
+            var contentFingerprint = CreateContentFingerprint(encodedSource);
+            var resizeMicroseconds = ElapsedMicroseconds(stageTimestamp);
+
+            stageTimestamp = Stopwatch.GetTimestamp();
             var encoder = new JpegBitmapEncoder { QualityLevel = _jpegQuality };
             encoder.Frames.Add(BitmapFrame.Create(encodedSource));
             using var stream = new MemoryStream();
             encoder.Save(stream);
+            var encodeMicroseconds = ElapsedMicroseconds(stageTimestamp);
+            stopwatch.Stop();
 
             return new ScreenFrame(
                 frameId,
@@ -123,7 +138,17 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
                 encodedSource.PixelHeight,
                 "image/jpeg",
                 stream.ToArray(),
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds,
+                resolution,
+                new CaptureStageTimings(
+                    surfaceSetupMicroseconds,
+                    blitMicroseconds,
+                    0,
+                    materializeMicroseconds,
+                    resizeMicroseconds,
+                    encodeMicroseconds,
+                    TicksToMicroseconds(stopwatch.ElapsedTicks)),
+                contentFingerprint);
         }
         finally
         {
@@ -146,19 +171,40 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
         }
     }
 
-    private static BitmapSource Resize(BitmapSource source, int maxEdge)
+    private static BitmapSource Resize(BitmapSource source, CaptureResolution resolution)
     {
-        var largestEdge = Math.Max(source.PixelWidth, source.PixelHeight);
-        if (largestEdge <= maxEdge)
+        if (!resolution.Resized)
         {
             return source;
         }
 
-        var scale = (double)maxEdge / largestEdge;
-        var resized = new TransformedBitmap(source, new ScaleTransform(scale, scale));
+        var scaleX = (double)resolution.Width / source.PixelWidth;
+        var scaleY = (double)resolution.Height / source.PixelHeight;
+        var resized = new TransformedBitmap(source, new ScaleTransform(scaleX, scaleY));
         resized.Freeze();
         return resized;
     }
+
+    // A tiny cursor-free grayscale image is enough to distinguish meaningful
+    // UI changes without retaining readable screen content in agent memory.
+    private static byte[] CreateContentFingerprint(BitmapSource source)
+    {
+        var gray = new FormatConvertedBitmap(source, PixelFormats.Gray8, null, 0);
+        gray.Freeze();
+        var scaled = new TransformedBitmap(
+            gray,
+            new ScaleTransform(32d / gray.PixelWidth, 18d / gray.PixelHeight));
+        scaled.Freeze();
+        var bytes = new byte[32 * 18];
+        scaled.CopyPixels(bytes, 32, 0);
+        return bytes;
+    }
+
+    private static long ElapsedMicroseconds(long startTimestamp)
+        => (long)(Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds * 1000);
+
+    private static long TicksToMicroseconds(long elapsedTicks)
+        => (long)(elapsedTicks * 1_000_000d / Stopwatch.Frequency);
 
     private static void DrawCursor(nint destinationDc, MonitorDescriptor monitor)
     {

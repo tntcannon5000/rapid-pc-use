@@ -7,11 +7,13 @@ internal sealed class ControlSession : IDisposable
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(3);
     private readonly object _leaseGate = new();
     private readonly object _cleanupGate = new();
+    private readonly object _cancellationGate = new();
     private readonly InputController _input;
     private readonly ControlOverlay _overlay;
     private readonly ControlSessionState _state = new();
     private readonly Timer _idleTimer;
     private FileStream? _lease;
+    private CancellationTokenSource _controlCancellation = CreateCancelledSource();
     private bool _disposed;
 
     internal ControlSession(InputController input, ControlOverlay overlay)
@@ -22,6 +24,17 @@ internal sealed class ControlSession : IDisposable
     }
 
     internal bool IsActive => _state.IsActive;
+
+    internal CancellationToken ControlCancellationToken
+    {
+        get
+        {
+            lock (_cancellationGate)
+            {
+                return _controlCancellation.Token;
+            }
+        }
+    }
 
     internal void Start()
     {
@@ -52,11 +65,13 @@ internal sealed class ControlSession : IDisposable
 
             try
             {
+                ResetControlCancellation();
                 _overlay.Show();
                 _ = _state.Start();
             }
             catch
             {
+                CancelControl();
                 _lease.Dispose();
                 _lease = null;
                 throw;
@@ -74,12 +89,16 @@ internal sealed class ControlSession : IDisposable
     internal void ThrowIfCannotContinue(ControlOperationLease operation)
         => _state.ThrowIfCannotContinue(operation);
 
+    internal void ThrowIfControlLost() => _state.ThrowIfInactive();
+
     internal void OnPhysicalEscape()
     {
         if (!_state.End(ControlEndReason.UserTakeover))
         {
             return;
         }
+
+        CancelControl();
 
         ThreadPool.QueueUserWorkItem(_ => CompleteStop(
             "control.user_takeover",
@@ -90,6 +109,7 @@ internal sealed class ControlSession : IDisposable
     internal void Stop()
     {
         var wasActive = _state.End(ControlEndReason.Stop);
+        CancelControl();
         CompleteStop(
             wasActive ? "control.released" : null,
             "Native mouse and keyboard control was released and the takeover cue was hidden.",
@@ -106,7 +126,12 @@ internal sealed class ControlSession : IDisposable
         _disposed = true;
         _idleTimer.Dispose();
         _ = _state.End(ControlEndReason.Dispose);
+        CancelControl();
         CompleteStop(null, null, throwOnError: false);
+        lock (_cancellationGate)
+        {
+            _controlCancellation.Dispose();
+        }
     }
 
     private void StopIfIdle()
@@ -117,6 +142,7 @@ internal sealed class ControlSession : IDisposable
         }
 
         DriverLog.Warning("control.idle_timeout", "The control session was idle for three minutes and was cancelled.");
+        CancelControl();
         CompleteStop(
             "control.idle_released",
             "Idle desktop control was released and the takeover cue was hidden.",
@@ -176,5 +202,36 @@ internal sealed class ControlSession : IDisposable
             _lease?.Dispose();
             _lease = null;
         }
+    }
+
+    private void ResetControlCancellation()
+    {
+        lock (_cancellationGate)
+        {
+            _controlCancellation.Dispose();
+            _controlCancellation = new CancellationTokenSource();
+        }
+    }
+
+    private void CancelControl()
+    {
+        lock (_cancellationGate)
+        {
+            try
+            {
+                _controlCancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposal already completed the control lifetime.
+            }
+        }
+    }
+
+    private static CancellationTokenSource CreateCancelledSource()
+    {
+        var source = new CancellationTokenSource();
+        source.Cancel();
+        return source;
     }
 }

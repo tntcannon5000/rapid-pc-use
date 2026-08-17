@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Text.Json;
+using RapidPcUse.Agent;
 
 namespace RapidPcUse;
 
-internal sealed class DesktopController : IDisposable
+internal sealed class DesktopController : IPcDesktop, IDisposable
 {
     private readonly InputController _input = new();
     private readonly IScreenCaptureBackend _capture;
@@ -14,6 +16,7 @@ internal sealed class DesktopController : IDisposable
     private long _lastFrameId;
     private DateTimeOffset _lastFrameTimestampUtc;
     private string? _lastTopologyKey;
+    private Dictionary<string, byte[]>? _lastFrameFingerprints;
 
     internal DesktopController(IScreenCaptureBackend? capture = null, TimeProvider? timeProvider = null)
     {
@@ -37,16 +40,16 @@ internal sealed class DesktopController : IDisposable
         return CaptureAndRemember(checkOperation);
     }
 
-    internal Observation? Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+    internal DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
     {
-        ValidateActionPlan(actions, settleMilliseconds);
+        var monitors = MonitorManager.GetMonitors();
+        ValidateActionPlan(actions, settleMilliseconds, monitors);
         ValidateFrame(frameId);
 
         var operation = _session.BeginOperation();
         Action checkOperation = () => _session.ThrowIfCannotContinue(operation);
         checkOperation();
 
-        var monitors = MonitorManager.GetMonitors();
         var topology = MonitorManager.GetTopologyKey(monitors);
         if (!string.Equals(topology, _lastTopologyKey, StringComparison.Ordinal))
         {
@@ -54,11 +57,15 @@ internal sealed class DesktopController : IDisposable
             throw new StaleFrameException("Display topology changed. Call pc_observe and use the new frame_id before acting.");
         }
 
+        var priorFingerprints = _lastFrameFingerprints;
         // A frame authorizes one action batch only. Consume it before native input starts.
         InvalidateFrame();
         var actionIndex = 0;
+        var actionTimings = new List<ActionTiming>(actions.GetArrayLength());
+        DesktopActionFailure? failure = null;
         foreach (var action in actions.EnumerateArray())
         {
+            var actionTimestamp = Stopwatch.GetTimestamp();
             try
             {
                 checkOperation();
@@ -76,15 +83,45 @@ internal sealed class DesktopController : IDisposable
             catch (Exception exception)
             {
                 var actionType = SafeActionType(action);
-                throw new PcActionException(actionIndex, actionType, SafeActionDescription(action, actionType), exception);
+                var wrapped = new PcActionException(
+                    actionIndex,
+                    actionType,
+                    SafeActionDescription(action, actionType),
+                    exception);
+                failure = new DesktopActionFailure(
+                    actionIndex + 1,
+                    actionType,
+                    wrapped.Message,
+                    actionIndex);
+                _input.ReleaseAll();
+                break;
             }
 
+            actionTimings.Add(CreateActionTiming(actionIndex, action, actionTimestamp));
             _session.Touch();
             actionIndex++;
         }
 
-        WaitCancellable(settleMilliseconds, checkOperation);
-        return observeAfter ? CaptureAndRemember(checkOperation) : null;
+        var settleTimestamp = Stopwatch.GetTimestamp();
+        Observation? observation = null;
+        // A partial batch must always return visible state, even when the
+        // caller originally opted out of observation, so it can replan safely.
+        if (observeAfter || failure is not null)
+        {
+            observation = CaptureWhenChanged(priorFingerprints, settleMilliseconds, checkOperation);
+        }
+        else
+        {
+            WaitCancellable(settleMilliseconds, checkOperation);
+        }
+
+        var settleElapsedMicroseconds = ElapsedMicroseconds(settleTimestamp);
+        return new DesktopActResult(
+            observation,
+            actionTimings,
+            settleMilliseconds,
+            settleElapsedMicroseconds,
+            failure);
     }
 
     internal void Stop()
@@ -92,6 +129,17 @@ internal sealed class DesktopController : IDisposable
         InvalidateFrame();
         _session.Stop();
     }
+
+    public CancellationToken ControlCancellationToken => _session.ControlCancellationToken;
+
+    public void ThrowIfControlLost() => _session.ThrowIfControlLost();
+
+    Observation IPcDesktop.Observe(bool beginControl) => Observe(beginControl);
+
+    DesktopActResult IPcDesktop.Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => Act(frameId, actions, settleMilliseconds, observeAfter);
+
+    void IPcDesktop.Stop() => Stop();
 
     public void Dispose()
     {
@@ -101,105 +149,150 @@ internal sealed class DesktopController : IDisposable
         _overlay.Dispose();
     }
 
-    internal static void ValidateActionPlan(JsonElement actions, int settleMilliseconds)
+    internal static void ValidateActionPlan(
+        JsonElement actions,
+        int settleMilliseconds,
+        IReadOnlyList<MonitorDescriptor>? monitors = null)
     {
         if (actions.ValueKind != JsonValueKind.Array || actions.GetArrayLength() == 0)
         {
-            throw new ArgumentException("actions must be a non-empty array.");
+            throw InvalidPlan("invalid_actions", "actions must be a non-empty array.", "actions");
         }
 
         if (actions.GetArrayLength() > SecurityLimits.MaxActionsPerBatch)
         {
-            throw new ArgumentException($"A batch may contain at most {SecurityLimits.MaxActionsPerBatch} actions.");
+            throw new PcActionPlanValidationException(
+                "too_many_actions",
+                $"A batch may contain at most {SecurityLimits.MaxActionsPerBatch} actions.",
+                "actions",
+                actions.GetArrayLength(),
+                1,
+                SecurityLimits.MaxActionsPerBatch);
         }
 
         RequireRange(settleMilliseconds, 0, SecurityLimits.MaxWaitMilliseconds, "settle_ms");
         long estimatedMilliseconds = settleMilliseconds;
+        var validationActionIndex = 0;
         foreach (var action in actions.EnumerateArray())
         {
-            if (action.ValueKind != JsonValueKind.Object)
+            var actionType = SafeActionType(action);
+            try
             {
-                throw new ArgumentException("Each action must be an object.");
-            }
+                if (action.ValueKind != JsonValueKind.Object)
+                {
+                    throw InvalidPlan("invalid_action", "Each action must be an object.");
+                }
 
-            var type = RequiredBoundedString(action, "type", 32).Trim().ToLowerInvariant();
-            switch (type)
-            {
-                case "move":
-                    ValidateDisplayPoint(action, "x", "y");
-                    break;
-                case "relative_move":
-                    RequireRange(RequiredInt(action, "x"), -32_768, 32_768, "x");
-                    RequireRange(RequiredInt(action, "y"), -32_768, 32_768, "y");
-                    break;
-                case "click":
-                    ValidateDisplayPoint(action, "x", "y");
-                    ValidateOptionalString(action, "button", 16);
-                    var count = OptionalBoundedInt(action, "count", 1, 1, 3);
-                    estimatedMilliseconds += (count - 1L) * 65L;
-                    break;
-                case "mouse_down":
-                    if (action.TryGetProperty("x", out _))
-                    {
+                var type = RequiredBoundedString(action, "type", 32).Trim().ToLowerInvariant();
+                actionType = type;
+                switch (type)
+                {
+                    case "move":
                         ValidateDisplayPoint(action, "x", "y");
-                    }
-
-                    ValidateOptionalString(action, "button", 16);
-                    break;
-                case "mouse_up":
-                    ValidateOptionalString(action, "button", 16);
-                    break;
-                case "drag":
-                    ValidateDisplayPoint(action, "x", "y");
-                    RequireRange(RequiredInt(action, "to_x"), 0, 1000, "to_x");
-                    RequireRange(RequiredInt(action, "to_y"), 0, 1000, "to_y");
-                    ValidateOptionalString(action, "button", 16);
-                    estimatedMilliseconds += OptionalBoundedInt(
-                        action,
-                        "duration_ms",
-                        250,
-                        0,
-                        SecurityLimits.MaxDragMilliseconds);
-                    break;
-                case "scroll":
-                    if (action.TryGetProperty("display_id", out _))
-                    {
+                        ValidateDisplay(action, monitors);
+                        break;
+                    case "relative_move":
+                        RequireRange(RequiredInt(action, "x"), -32_768, 32_768, "x");
+                        RequireRange(RequiredInt(action, "y"), -32_768, 32_768, "y");
+                        break;
+                    case "click":
+                    case "double_click":
                         ValidateDisplayPoint(action, "x", "y");
-                    }
+                        ValidateDisplay(action, monitors);
+                        ValidateOptionalButton(action);
+                        var count = type == "double_click"
+                            ? 2
+                            : OptionalBoundedInt(action, "count", 1, 1, 3);
+                        estimatedMilliseconds += (count - 1L) * 65L;
+                        break;
+                    case "mouse_down":
+                        if (action.TryGetProperty("x", out _))
+                        {
+                            ValidateDisplayPoint(action, "x", "y");
+                            ValidateDisplay(action, monitors);
+                        }
 
-                    _ = OptionalBoundedInt(action, "scroll_y", 0, -100, 100);
-                    _ = OptionalBoundedInt(action, "scroll_x", 0, -100, 100);
-                    break;
-                case "type":
-                    var text = RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction);
-                    var interval = OptionalBoundedInt(
-                        action,
-                        "interval_ms",
-                        2,
-                        0,
-                        SecurityLimits.MaxTypeIntervalMilliseconds);
-                    estimatedMilliseconds += (long)text.Length * interval;
-                    break;
-                case "key":
-                case "key_down":
-                case "key_up":
-                    _ = RequiredBoundedString(action, "keys", SecurityLimits.MaxKeyChordCharacters);
-                    break;
-                case "wait":
-                    estimatedMilliseconds += RequireRange(
-                        RequiredInt(action, "ms"),
-                        0,
-                        SecurityLimits.MaxWaitMilliseconds,
-                        "ms");
-                    break;
-                default:
-                    throw new ArgumentException("Unsupported action type.");
+                        ValidateOptionalButton(action);
+                        break;
+                    case "mouse_up":
+                        ValidateOptionalButton(action);
+                        break;
+                    case "drag":
+                        ValidateDisplayPoint(action, "x", "y");
+                        ValidateDisplay(action, monitors);
+                        RequireRange(RequiredInt(action, "to_x"), 0, 1000, "to_x");
+                        RequireRange(RequiredInt(action, "to_y"), 0, 1000, "to_y");
+                        ValidateOptionalButton(action);
+                        estimatedMilliseconds += OptionalBoundedInt(
+                            action,
+                            "duration_ms",
+                            250,
+                            0,
+                            SecurityLimits.MaxDragMilliseconds);
+                        break;
+                    case "scroll":
+                        if (action.TryGetProperty("display_id", out _))
+                        {
+                            ValidateDisplayPoint(action, "x", "y");
+                            ValidateDisplay(action, monitors);
+                        }
+
+                        _ = OptionalBoundedInt(
+                            action,
+                            "scroll_y",
+                            0,
+                            SecurityLimits.MinScrollDeltaPerAction,
+                            SecurityLimits.MaxScrollDeltaPerAction);
+                        _ = OptionalBoundedInt(
+                            action,
+                            "scroll_x",
+                            0,
+                            SecurityLimits.MinScrollDeltaPerAction,
+                            SecurityLimits.MaxScrollDeltaPerAction);
+                        break;
+                    case "type":
+                        var text = RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction);
+                        var interval = OptionalBoundedInt(
+                            action,
+                            "interval_ms",
+                            2,
+                            0,
+                            SecurityLimits.MaxTypeIntervalMilliseconds);
+                        estimatedMilliseconds += (long)text.Length * interval;
+                        break;
+                    case "key":
+                        ValidateKey(action, chord: true);
+                        break;
+                    case "key_down":
+                    case "key_up":
+                        ValidateKey(action, chord: false);
+                        break;
+                    case "wait":
+                        estimatedMilliseconds += RequireRange(
+                            RequiredInt(action, "ms"),
+                            0,
+                            SecurityLimits.MaxWaitMilliseconds,
+                            "ms");
+                        break;
+                    default:
+                        throw InvalidPlan("unsupported_action_type", "Unsupported action type.", "type");
+                }
+
+                if (estimatedMilliseconds > SecurityLimits.MaxBatchMilliseconds)
+                {
+                    throw new PcActionPlanValidationException(
+                        "batch_duration_exceeded",
+                        $"The batch may take at most {SecurityLimits.MaxBatchMilliseconds} milliseconds.",
+                        allowedMinimum: 0,
+                        allowedMaximum: SecurityLimits.MaxBatchMilliseconds);
+                }
             }
-
-            if (estimatedMilliseconds > SecurityLimits.MaxBatchMilliseconds)
+            catch (PcActionPlanValidationException exception)
             {
-                throw new ArgumentException($"The batch may take at most {SecurityLimits.MaxBatchMilliseconds} milliseconds.");
+                throw exception.WithAction(validationActionIndex + 1, actionType);
             }
+
+            validationActionIndex++;
         }
     }
 
@@ -212,8 +305,60 @@ internal sealed class DesktopController : IDisposable
         _lastFrameId = observation.FrameId;
         _lastFrameTimestampUtc = _timeProvider.GetUtcNow();
         _lastTopologyKey = observation.TopologyKey;
+        _lastFrameFingerprints = observation.Frames.ToDictionary(
+            frame => frame.Monitor.Id,
+            frame => frame.ContentFingerprint ?? System.Security.Cryptography.SHA256.HashData(frame.Bytes),
+            StringComparer.Ordinal);
         _session.Touch();
         return observation;
+    }
+
+    private Observation CaptureWhenChanged(
+        IReadOnlyDictionary<string, byte[]>? prior,
+        int initialDelayMilliseconds,
+        Action checkOperation)
+    {
+        WaitCancellable(initialDelayMilliseconds, checkOperation);
+        var observation = CaptureAndRemember(checkOperation);
+        if (prior is null || FingerprintsChanged(prior, _lastFrameFingerprints))
+        {
+            return observation;
+        }
+
+        // Most Windows repaints arrive within one of these short backoffs. This
+        // replaces multi-second guessed waits while keeping the loop responsive.
+        foreach (var delay in new[] { 50, 100, 200 })
+        {
+            WaitCancellable(delay, checkOperation);
+            observation = CaptureAndRemember(checkOperation);
+            if (FingerprintsChanged(prior, _lastFrameFingerprints))
+            {
+                break;
+            }
+        }
+
+        return observation;
+    }
+
+    private static bool FingerprintsChanged(
+        IReadOnlyDictionary<string, byte[]> prior,
+        Dictionary<string, byte[]>? current)
+    {
+        if (current is null || prior.Count != current.Count)
+        {
+            return true;
+        }
+
+        foreach (var pair in prior)
+        {
+            if (!current.TryGetValue(pair.Key, out var candidate) ||
+                !pair.Value.AsSpan().SequenceEqual(candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void ValidateFrame(long frameId)
@@ -235,6 +380,7 @@ internal sealed class DesktopController : IDisposable
         _lastFrameId = 0;
         _lastFrameTimestampUtc = default;
         _lastTopologyKey = null;
+        _lastFrameFingerprints = null;
     }
 
     private void ExecuteAction(
@@ -252,12 +398,13 @@ internal sealed class DesktopController : IDisposable
                 InputController.RelativeMove(RequiredInt(action, "x"), RequiredInt(action, "y"));
                 break;
             case "click":
+            case "double_click":
                 _input.Click(
                     Display(action, monitors),
                     RequiredInt(action, "x"),
                     RequiredInt(action, "y"),
                     OptionalString(action, "button", "left"),
-                    OptionalInt(action, "count", 1),
+                    type == "double_click" ? 2 : OptionalInt(action, "count", 1),
                     checkOperation);
                 break;
             case "mouse_down":
@@ -297,8 +444,8 @@ internal sealed class DesktopController : IDisposable
                     display,
                     x,
                     y,
-                    OptionalInt(action, "scroll_y", 0),
-                    OptionalInt(action, "scroll_x", 0));
+                    ScrollTicks(OptionalInt(action, "scroll_y", 0)),
+                    ScrollTicks(OptionalInt(action, "scroll_x", 0)));
                 break;
             case "type":
                 _input.TypeText(
@@ -339,6 +486,21 @@ internal sealed class DesktopController : IDisposable
         checkOperation();
     }
 
+    private static ActionTiming CreateActionTiming(int actionIndex, JsonElement action, long startTimestamp)
+    {
+        var type = SafeActionType(action);
+        return new ActionTiming(
+            actionIndex + 1,
+            type,
+            ElapsedMicroseconds(startTimestamp),
+            type == "wait" ? SafeInteger(action, "ms") : null,
+            type == "type" ? SafeString(action, "text")?.Length : null,
+            type == "type" ? SafeInteger(action, "interval_ms") ?? 2 : null);
+    }
+
+    private static long ElapsedMicroseconds(long startTimestamp)
+        => (long)(Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds * 1000);
+
     private static void ValidateDisplayPoint(JsonElement action, string xProperty, string yProperty)
     {
         _ = RequiredBoundedString(action, "display_id", 128);
@@ -353,13 +515,19 @@ internal sealed class DesktopController : IDisposable
     {
         if (!value.TryGetProperty(property, out var element) || element.ValueKind != JsonValueKind.String)
         {
-            throw new ArgumentException($"'{property}' must be a string.");
+            throw InvalidPlan("invalid_field_type", $"'{property}' must be a string.", property);
         }
 
         var result = element.GetString()!;
         if (result.Length > maximumLength)
         {
-            throw new ArgumentException($"'{property}' exceeds its maximum length of {maximumLength} characters.");
+            throw new PcActionPlanValidationException(
+                "string_too_long",
+                $"'{property}' exceeds its maximum length of {maximumLength} characters.",
+                property,
+                result.Length,
+                0,
+                maximumLength);
         }
 
         return result;
@@ -369,7 +537,7 @@ internal sealed class DesktopController : IDisposable
     {
         if (!value.TryGetProperty(property, out var element) || !element.TryGetInt32(out var result))
         {
-            throw new ArgumentException($"'{property}' must be an integer.");
+            throw InvalidPlan("invalid_field_type", $"'{property}' must be an integer.", property);
         }
 
         return result;
@@ -392,7 +560,7 @@ internal sealed class DesktopController : IDisposable
 
         if (!element.TryGetInt32(out var result))
         {
-            throw new ArgumentException($"'{property}' must be an integer.");
+            throw InvalidPlan("invalid_field_type", $"'{property}' must be an integer.", property);
         }
 
         return RequireRange(result, minimum, maximum, property);
@@ -402,7 +570,13 @@ internal sealed class DesktopController : IDisposable
     {
         if (value < minimum || value > maximum)
         {
-            throw new ArgumentOutOfRangeException(property, $"'{property}' must be between {minimum} and {maximum}.");
+            throw new PcActionPlanValidationException(
+                "numeric_out_of_range",
+                $"'{property}' must be between {minimum} and {maximum}.",
+                property,
+                value,
+                minimum,
+                maximum);
         }
 
         return value;
@@ -415,6 +589,73 @@ internal sealed class DesktopController : IDisposable
             _ = RequiredBoundedString(value, property, maximumLength);
         }
     }
+
+    private static void ValidateOptionalButton(JsonElement value)
+    {
+        if (!value.TryGetProperty("button", out _))
+        {
+            return;
+        }
+
+        try
+        {
+            _ = InputController.CanonicalButton(RequiredBoundedString(value, "button", 16));
+        }
+        catch (ArgumentException)
+        {
+            throw InvalidPlan("unsupported_button", "'button' must be left, right, middle, x1, or x2.", "button");
+        }
+    }
+
+    private static void ValidateDisplay(JsonElement action, IReadOnlyList<MonitorDescriptor>? monitors)
+    {
+        if (monitors is null)
+        {
+            return;
+        }
+
+        var displayId = RequiredBoundedString(action, "display_id", 128);
+        if (!monitors.Any(monitor => string.Equals(monitor.Id, displayId, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw InvalidPlan("unknown_display", "'display_id' is not present in the current display manifest.", "display_id");
+        }
+    }
+
+    private static void ValidateKey(JsonElement action, bool chord)
+    {
+        var keys = RequiredBoundedString(action, "keys", SecurityLimits.MaxKeyChordCharacters);
+        try
+        {
+            if (chord)
+            {
+                InputController.ValidateChord(keys);
+            }
+            else
+            {
+                InputController.ValidateKey(keys);
+            }
+        }
+        catch (ArgumentException)
+        {
+            throw InvalidPlan("unsupported_key", "'keys' contains a key name the Windows input adapter does not support.", "keys");
+        }
+    }
+
+    internal static int ScrollTicks(int delta)
+    {
+        if (delta == 0)
+        {
+            return 0;
+        }
+
+        var ticks = Math.Max(1, Math.Abs((int)Math.Round(
+            (double)delta / SecurityLimits.ScrollDeltaPerWheelTick,
+            MidpointRounding.AwayFromZero)));
+        return Math.Sign(delta) * Math.Min(ticks, SecurityLimits.MaxWheelTicksPerAction);
+    }
+
+    private static PcActionPlanValidationException InvalidPlan(string code, string message, string? field = null)
+        => new(code, message, field);
 
     private static string OptionalString(JsonElement value, string property, string fallback)
         => value.TryGetProperty(property, out var element) && element.ValueKind == JsonValueKind.String
@@ -435,7 +676,7 @@ internal sealed class DesktopController : IDisposable
         var y = SafeInteger(action, "y");
         return actionType switch
         {
-            "move" or "click" => $"{actionType} on {display ?? "an unknown display"} at normalized ({x?.ToString() ?? "?"}, {y?.ToString() ?? "?"})",
+            "move" or "click" or "double_click" => $"{actionType} on {display ?? "an unknown display"} at normalized ({x?.ToString() ?? "?"}, {y?.ToString() ?? "?"})",
             "drag" => $"drag on {display ?? "an unknown display"} from normalized ({x?.ToString() ?? "?"}, {y?.ToString() ?? "?"}) to ({SafeInteger(action, "to_x")?.ToString() ?? "?"}, {SafeInteger(action, "to_y")?.ToString() ?? "?"})",
             "scroll" => $"scroll{(display is null ? string.Empty : $" on {display}")}",
             "relative_move" => $"relative cursor move ({x?.ToString() ?? "?"}, {y?.ToString() ?? "?"})",

@@ -17,5 +17,6 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="RapidPcUse.SecurityTests" />
+    <InternalsVisibleTo Include="RapidPcUse.AgentTests" />
   </ItemGroup>
 </Project>
