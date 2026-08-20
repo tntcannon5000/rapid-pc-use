@@ -7,14 +7,30 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
-$sdkVersion = '10.0.109'
+$sdkVersion = '10.0.110'
+$sdkArchiveSha512 = '652eaabac68508925225ca4b3a4f7be0353ec69c40bff838a05709769e94b9013f8bf03ee396d0cabe8438508a83521b2ced1b23d3a3019b13c49d1feaf6b039'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $project = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
+$performanceFixtureProject = Join-Path $root 'tools\PerformanceFixture\PerformanceFixture.csproj'
+$performanceFixtureOutput = Join-Path $root "tools\PerformanceFixture\bin\$Runtime"
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $binRoot = [IO.Path]::GetFullPath((Join-Path $plugin 'bin'))
 $output = [IO.Path]::GetFullPath((Join-Path $binRoot $Runtime))
 $localDotnetRoot = Join-Path $root ".tools\dotnet\$sdkVersion"
 $localDotnet = Join-Path $localDotnetRoot 'dotnet.exe'
+$buildMutex = [Threading.Mutex]::new($false, "Local\RapidPcUse.Build.$Runtime")
+$buildMutexHeld = $false
+
+try {
+    try {
+        $buildMutexHeld = $buildMutex.WaitOne([TimeSpan]::FromMinutes(15))
+    }
+    catch [Threading.AbandonedMutexException] {
+        $buildMutexHeld = $true
+    }
+    if (-not $buildMutexHeld) {
+        throw 'Timed out waiting for another Rapid PC Use build to finish.'
+    }
 
 function Test-DotnetSdk([string]$Executable, [string]$Version) {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
@@ -52,14 +68,19 @@ else {
         }
         else {
             $installToken = [Guid]::NewGuid().ToString('N')
-            $installer = Join-Path $env:TEMP "dotnet-install-rapid-pc-use-$installToken.ps1"
+            $sdkArchive = Join-Path $env:TEMP "dotnet-sdk-$sdkVersion-win-x64-$installToken.zip"
             $installParent = Split-Path $localDotnetRoot -Parent
             $installStaging = Join-Path $installParent ".$sdkVersion.staging-$installToken"
             New-Item -ItemType Directory -Force $installParent | Out-Null
             try {
-                Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
-                & $installer -Version $sdkVersion -InstallDir $installStaging -NoPath
-                if ($LASTEXITCODE -ne 0 -or -not (Test-DotnetSdk (Join-Path $installStaging 'dotnet.exe') $sdkVersion)) {
+                $sdkUrl = "https://builds.dotnet.microsoft.com/dotnet/Sdk/$sdkVersion/dotnet-sdk-$sdkVersion-win-x64.zip"
+                Invoke-WebRequest -UseBasicParsing $sdkUrl -OutFile $sdkArchive
+                $actualArchiveHash = (Get-FileHash -LiteralPath $sdkArchive -Algorithm SHA512).Hash.ToLowerInvariant()
+                if ($actualArchiveHash -ne $sdkArchiveSha512) {
+                    throw "The .NET SDK archive hash '$actualArchiveHash' does not match the pinned Microsoft SHA-512."
+                }
+                Expand-Archive -LiteralPath $sdkArchive -DestinationPath $installStaging
+                if (-not (Test-DotnetSdk (Join-Path $installStaging 'dotnet.exe') $sdkVersion)) {
                     throw "The .NET $sdkVersion SDK installation failed."
                 }
 
@@ -72,8 +93,8 @@ else {
                 if (Test-Path -LiteralPath $installStaging) {
                     Remove-Item -LiteralPath $installStaging -Recurse -Force
                 }
-                if (Test-Path -LiteralPath $installer) {
-                    Remove-Item -LiteralPath $installer -Force
+                if (Test-Path -LiteralPath $sdkArchive) {
+                    Remove-Item -LiteralPath $sdkArchive -Force
                 }
             }
             $dotnet = $localDotnet
@@ -103,6 +124,20 @@ foreach ($entry in $redistributionFiles.GetEnumerator()) {
 }
 
 New-Item -ItemType Directory -Force $binRoot | Out-Null
+$staleStaging = @(Get-ChildItem -LiteralPath $binRoot -Directory -Force -Filter ".$Runtime.staging-*")
+$staleBackups = @(Get-ChildItem -LiteralPath $binRoot -Directory -Force -Filter ".$Runtime.backup-*" | Sort-Object LastWriteTimeUtc -Descending)
+if (-not (Test-Path -LiteralPath $output) -and $staleBackups.Count -gt 0) {
+    Move-Item -LiteralPath $staleBackups[0].FullName -Destination $output
+    $staleBackups = @($staleBackups | Select-Object -Skip 1)
+}
+foreach ($abandoned in @($staleStaging) + @($staleBackups)) {
+    $abandonedPath = [IO.Path]::GetFullPath($abandoned.FullName)
+    if (-not $abandonedPath.StartsWith($binRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean an abandoned build directory outside the plugin bin directory: $abandonedPath"
+    }
+    Remove-Item -LiteralPath $abandonedPath -Recurse -Force
+}
+
 $token = [Guid]::NewGuid().ToString('N')
 $staging = [IO.Path]::GetFullPath((Join-Path $binRoot ".$Runtime.staging-$token"))
 $backup = [IO.Path]::GetFullPath((Join-Path $binRoot ".$Runtime.backup-$token"))
@@ -159,4 +194,26 @@ foreach ($entry in $redistributionFiles.GetEnumerator()) {
     Copy-Item -LiteralPath $entry.Key -Destination $entry.Value -Force
 }
 
+& $dotnet publish $performanceFixtureProject `
+    -c Release `
+    -r $Runtime `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o $performanceFixtureOutput `
+    --nologo
+if ($LASTEXITCODE -ne 0) {
+    throw 'Rapid PC Use performance fixture build failed.'
+}
+
 Write-Host "Built Rapid PC Use: $output" -ForegroundColor Green
+}
+finally {
+    if ($buildMutexHeld) {
+        $buildMutex.ReleaseMutex()
+    }
+    $buildMutex.Dispose()
+}

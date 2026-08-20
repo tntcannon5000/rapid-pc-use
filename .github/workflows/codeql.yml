@@ -1,0 +1,37 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: 10.0.110
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1ad29ea4a422cce9a242a9fae469541dcd08addc
+        with:
+          languages: csharp
+          build-mode: manual
+      - name: Build
+        shell: powershell
+        run: .\scripts\build.ps1
+      - name: Analyze
+        uses: github/codeql-action/analyze@1ad29ea4a422cce9a242a9fae469541dcd08addc
+        with:
+          category: /language:csharp

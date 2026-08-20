@@ -5,6 +5,7 @@ namespace RapidPcUse;
 
 internal sealed class InputController
 {
+    private const int MaximumTextEventsPerBatch = 512;
     private readonly object _gate = new();
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly HashSet<string> _heldButtons = new(StringComparer.OrdinalIgnoreCase);
@@ -49,17 +50,18 @@ internal sealed class InputController
         int y,
         string button,
         int count,
-        Func<bool> isCancelled)
+        Action checkOperation)
     {
         Move(monitor, x, y);
         for (var index = 0; index < count; index++)
         {
-            ThrowIfCancelled(isCancelled);
+            checkOperation();
             MouseDown(button);
             MouseUp(button);
             if (index + 1 < count)
             {
                 Thread.Sleep(65);
+                checkOperation();
             }
         }
     }
@@ -69,10 +71,11 @@ internal sealed class InputController
         lock (_gate)
         {
             var canonical = CanonicalButton(button);
-            if (_heldButtons.Add(canonical))
+            if (!_heldButtons.Contains(canonical))
             {
                 var (flag, data) = MouseButtonInput(canonical, down: true);
                 SendMouse(flag, data);
+                _heldButtons.Add(canonical);
             }
         }
     }
@@ -82,10 +85,11 @@ internal sealed class InputController
         lock (_gate)
         {
             var canonical = CanonicalButton(button);
-            if (_heldButtons.Remove(canonical))
+            if (_heldButtons.Contains(canonical))
             {
                 var (flag, data) = MouseButtonInput(canonical, down: false);
                 SendMouse(flag, data);
+                _heldButtons.Remove(canonical);
             }
         }
     }
@@ -98,7 +102,7 @@ internal sealed class InputController
         int toY,
         int durationMilliseconds,
         string button,
-        Func<bool> isCancelled)
+        Action checkOperation)
     {
         Move(monitor, fromX, fromY);
         MouseDown(button);
@@ -107,7 +111,7 @@ internal sealed class InputController
             var steps = Math.Max(1, durationMilliseconds / 5);
             for (var step = 1; step <= steps; step++)
             {
-                ThrowIfCancelled(isCancelled);
+                checkOperation();
                 var t = (double)step / steps;
                 var eased = t * t * (3 - (2 * t));
                 var x = (int)Math.Round(fromX + ((toX - fromX) * eased));
@@ -116,6 +120,7 @@ internal sealed class InputController
                 if (durationMilliseconds > 0)
                 {
                     Thread.Sleep(5);
+                    checkOperation();
                 }
             }
         }
@@ -143,43 +148,69 @@ internal sealed class InputController
         }
     }
 
-    internal void TypeText(string text, int intervalMilliseconds, Func<bool> isCancelled)
+    internal static void TypeText(string text, int intervalMilliseconds, Action checkOperation)
     {
+        if (intervalMilliseconds == 0)
+        {
+            foreach (var batch in BuildTextInputBatches(text))
+            {
+                checkOperation();
+                SendInputs(batch);
+                checkOperation();
+            }
+
+            return;
+        }
+
         for (var index = 0; index < text.Length; index++)
         {
-            ThrowIfCancelled(isCancelled);
+            checkOperation();
             var character = text[index];
             if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
             {
                 continue;
             }
 
-            switch (character)
-            {
-                case '\r':
-                case '\n':
-                    PressVirtualKey(0x0D);
-                    break;
-                case '\t':
-                    PressVirtualKey(0x09);
-                    break;
-                case '\b':
-                    PressVirtualKey(0x08);
-                    break;
-                default:
-                    SendUnicode(character, down: true);
-                    SendUnicode(character, down: false);
-                    break;
-            }
+            var events = TextEvents(character);
+            SendInputs([events.Down, events.Up]);
 
-            if (intervalMilliseconds > 0)
-            {
-                Thread.Sleep(intervalMilliseconds);
-            }
+            Thread.Sleep(intervalMilliseconds);
+            checkOperation();
         }
     }
 
-    internal void PressChord(string chord, Func<bool> isCancelled)
+    internal static IReadOnlyList<NativeMethods.Input[]> BuildTextInputBatches(string text)
+    {
+        var batches = new List<NativeMethods.Input[]>();
+        var pending = new List<NativeMethods.Input>(Math.Min(MaximumTextEventsPerBatch, text.Length * 2));
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
+            {
+                continue;
+            }
+
+            if (pending.Count + 2 > MaximumTextEventsPerBatch)
+            {
+                batches.Add(pending.ToArray());
+                pending.Clear();
+            }
+
+            var events = TextEvents(character);
+            pending.Add(events.Down);
+            pending.Add(events.Up);
+        }
+
+        if (pending.Count > 0)
+        {
+            batches.Add(pending.ToArray());
+        }
+
+        return batches;
+    }
+
+    internal void PressChord(string chord, Action checkOperation)
     {
         var tokens = chord.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         if (tokens.Length == 0)
@@ -193,7 +224,7 @@ internal sealed class InputController
         {
             foreach (var key in keys)
             {
-                ThrowIfCancelled(isCancelled);
+                checkOperation();
                 KeyDown(key);
                 pressed.Add(key);
             }
@@ -215,19 +246,49 @@ internal sealed class InputController
     {
         lock (_gate)
         {
-            foreach (var button in _heldButtons.ToArray())
+            var errors = new List<Exception>();
+            ReleaseHeldInputs(errors);
+            if (_heldButtons.Count > 0 || _heldKeys.Count > 0)
+            {
+                Thread.Sleep(10);
+                errors.Clear();
+                ReleaseHeldInputs(errors);
+            }
+
+            if (_heldButtons.Count > 0 || _heldKeys.Count > 0)
+            {
+                throw new AggregateException("One or more held native inputs could not be released.", errors);
+            }
+        }
+    }
+
+    private void ReleaseHeldInputs(List<Exception> errors)
+    {
+        foreach (var button in _heldButtons.ToArray())
+        {
+            try
             {
                 var (flag, data) = MouseButtonInput(button, down: false);
-                TrySendMouse(flag, data);
+                SendMouse(flag, data);
+                _heldButtons.Remove(button);
             }
-
-            _heldButtons.Clear();
-            foreach (var key in _heldKeys.Reverse().ToArray())
+            catch (Exception exception)
             {
-                TrySendKeyboard(key, down: false);
+                errors.Add(exception);
             }
+        }
 
-            _heldKeys.Clear();
+        foreach (var key in _heldKeys.Reverse().ToArray())
+        {
+            try
+            {
+                SendKeyboard(key, down: false);
+                _heldKeys.Remove(key);
+            }
+            catch (Exception exception)
+            {
+                errors.Add(exception);
+            }
         }
     }
 
@@ -235,9 +296,10 @@ internal sealed class InputController
     {
         lock (_gate)
         {
-            if (_heldKeys.Add(virtualKey))
+            if (!_heldKeys.Contains(virtualKey))
             {
                 SendKeyboard(virtualKey, down: true);
+                _heldKeys.Add(virtualKey);
             }
         }
     }
@@ -246,17 +308,12 @@ internal sealed class InputController
     {
         lock (_gate)
         {
-            if (_heldKeys.Remove(virtualKey))
+            if (_heldKeys.Contains(virtualKey))
             {
                 SendKeyboard(virtualKey, down: false);
+                _heldKeys.Remove(virtualKey);
             }
         }
-    }
-
-    private void PressVirtualKey(ushort virtualKey)
-    {
-        KeyDown(virtualKey);
-        KeyUp(virtualKey);
     }
 
     private static (int X, int Y) MapNormalizedPoint(MonitorDescriptor monitor, int x, int y)
@@ -271,14 +328,30 @@ internal sealed class InputController
         return (monitor.Left + localX, monitor.Top + localY);
     }
 
-    private static string CanonicalButton(string button) => button.Trim().ToLowerInvariant() switch
+    internal static void ValidateChord(string chord)
+    {
+        var tokens = chord.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0)
+        {
+            throw new ArgumentException("key chord cannot be empty.");
+        }
+
+        foreach (var token in tokens)
+        {
+            _ = KeyTokenToVirtualKey(token);
+        }
+    }
+
+    internal static void ValidateKey(string key) => _ = KeyTokenToVirtualKey(key);
+
+    internal static string CanonicalButton(string button) => button.Trim().ToLowerInvariant() switch
     {
         "left" or "l" => "left",
         "right" or "r" => "right",
         "middle" or "m" => "middle",
         "x1" => "x1",
         "x2" => "x2",
-        _ => throw new ArgumentException($"Unsupported mouse button '{button}'."),
+        _ => throw new ArgumentException("Unsupported mouse button."),
     };
 
     private static (uint Flag, uint Data) MouseButtonInput(string button, bool down) => (button, down) switch
@@ -293,7 +366,7 @@ internal sealed class InputController
         ("x1", false) => (NativeMethods.MouseeventfXup, NativeMethods.Xbutton1),
         ("x2", true) => (NativeMethods.MouseeventfXdown, NativeMethods.Xbutton2),
         ("x2", false) => (NativeMethods.MouseeventfXup, NativeMethods.Xbutton2),
-        _ => throw new ArgumentException($"Unsupported mouse button '{button}'."),
+        _ => throw new ArgumentException("Unsupported mouse button."),
     };
 
     private static ushort KeyTokenToVirtualKey(string token)
@@ -352,7 +425,7 @@ internal sealed class InputController
             "RBRACKET" => 0xDD,
             "BACKTICK" or "GRAVE" => 0xC0,
             _ when token.Length == 1 => VirtualKeyForCharacter(token[0]),
-            _ => throw new ArgumentException($"Unsupported key '{token}'."),
+            _ => throw new ArgumentException("Unsupported key."),
         };
     }
 
@@ -361,55 +434,15 @@ internal sealed class InputController
         var mapped = NativeMethods.VkKeyScan(character);
         if (mapped == -1)
         {
-            throw new ArgumentException($"No virtual key mapping exists for '{character}'. Use type text instead.");
+            throw new ArgumentException("No virtual key mapping exists for this character. Use type text instead.");
         }
 
         return (ushort)(mapped & 0xFF);
     }
 
-    private static void ThrowIfCancelled(Func<bool> isCancelled)
-    {
-        if (isCancelled())
-        {
-            throw new UserTakeoverException();
-        }
-    }
-
-    private static void SendUnicode(char character, bool down)
-    {
-        var flags = NativeMethods.KeyeventfUnicode | (down ? 0 : NativeMethods.KeyeventfKeyup);
-        SendInputs([
-            new NativeMethods.Input
-            {
-                Type = NativeMethods.InputKeyboard,
-                Data = new NativeMethods.InputUnion
-                {
-                    Keyboard = new NativeMethods.KeyboardInput
-                    {
-                        ScanCode = character,
-                        Flags = flags,
-                        ExtraInfo = NativeMethods.InputSentinel,
-                    },
-                },
-            },
-        ]);
-    }
-
     private static void SendKeyboard(ushort virtualKey, bool down)
     {
         SendInputs([KeyboardEvent(virtualKey, down)]);
-    }
-
-    private static void TrySendKeyboard(ushort virtualKey, bool down)
-    {
-        try
-        {
-            SendKeyboard(virtualKey, down);
-        }
-        catch (Win32Exception)
-        {
-            // Best-effort cleanup during takeover or process shutdown.
-        }
     }
 
     private static NativeMethods.Input KeyboardEvent(ushort virtualKey, bool down) => new()
@@ -426,21 +459,31 @@ internal sealed class InputController
         },
     };
 
+    private static NativeMethods.Input UnicodeEvent(char character, bool down) => new()
+    {
+        Type = NativeMethods.InputKeyboard,
+        Data = new NativeMethods.InputUnion
+        {
+            Keyboard = new NativeMethods.KeyboardInput
+            {
+                ScanCode = character,
+                Flags = NativeMethods.KeyeventfUnicode | (down ? 0 : NativeMethods.KeyeventfKeyup),
+                ExtraInfo = NativeMethods.InputSentinel,
+            },
+        },
+    };
+
+    private static (NativeMethods.Input Down, NativeMethods.Input Up) TextEvents(char character) => character switch
+    {
+        '\r' or '\n' => (KeyboardEvent(0x0D, down: true), KeyboardEvent(0x0D, down: false)),
+        '\t' => (KeyboardEvent(0x09, down: true), KeyboardEvent(0x09, down: false)),
+        '\b' => (KeyboardEvent(0x08, down: true), KeyboardEvent(0x08, down: false)),
+        _ => (UnicodeEvent(character, down: true), UnicodeEvent(character, down: false)),
+    };
+
     private static void SendMouse(uint flags, uint data, int dx = 0, int dy = 0)
     {
         SendInputs([MouseEvent(flags, data, dx, dy)]);
-    }
-
-    private static void TrySendMouse(uint flags, uint data)
-    {
-        try
-        {
-            SendMouse(flags, data);
-        }
-        catch (Win32Exception)
-        {
-            // Best-effort cleanup during takeover or process shutdown.
-        }
     }
 
     private static NativeMethods.Input MouseEvent(uint flags, uint data, int dx, int dy) => new()

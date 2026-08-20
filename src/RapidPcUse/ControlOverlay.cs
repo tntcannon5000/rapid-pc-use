@@ -217,7 +217,13 @@ internal sealed class ControlOverlay : IDisposable
                     throw new Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error(), "Could not configure overlay transparency.");
                 }
 
-                _ = NativeMethods.SetWindowDisplayAffinity(window, NativeMethods.WdaExcludefromcapture);
+                if (!NativeMethods.SetWindowDisplayAffinity(window, NativeMethods.WdaExcludefromcapture))
+                {
+                    DriverLog.Warning(
+                        "overlay.capture_exclusion_unavailable",
+                        "Windows could not exclude the visible control cue from screenshots.",
+                        exception: new Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error()));
+                }
                 _ = NativeMethods.SetWindowPos(
                     window,
                     NativeMethods.HwndTopmost,

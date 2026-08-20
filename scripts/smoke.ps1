@@ -37,16 +37,39 @@ function Invoke-Mcp([int]$Id, [string]$Method, [hashtable]$Parameters) {
         }
         throw "The driver closed its output before returning an MCP response.$detail"
     }
-    return $line | ConvertFrom-Json
+    $response = $line | ConvertFrom-Json
+    if ($null -ne $response.error) {
+        throw "MCP method '$Method' failed with JSON-RPC code $($response.error.code): $($response.error.message)"
+    }
+    return $response
 }
 
 try {
-    $initialize = Invoke-Mcp 1 'initialize' @{ protocolVersion = '2025-11-25' }
+    $initialize = Invoke-Mcp 1 'initialize' @{
+        protocolVersion = '2025-11-25'
+        capabilities = @{}
+        clientInfo = @{ name = 'rapid-pc-use-verification-smoke'; version = '1' }
+    }
     $observe = Invoke-Mcp 2 'tools/call' @{
         name = 'pc_observe'
         arguments = @{ begin_control = $true }
     }
-    $stop = Invoke-Mcp 3 'tools/call' @{ name = 'pc_stop'; arguments = @{} }
+    $observedManifestText = [string]($observe.result.content | Where-Object type -eq 'text' | Select-Object -First 1 -ExpandProperty text)
+    $observedManifestMatch = [Regex]::Match($observedManifestText, '^RAPID_PC_FRAME (?<json>.+)$')
+    if (-not $observedManifestMatch.Success) {
+        throw 'The observation did not return a frame manifest.'
+    }
+    $observedManifest = $observedManifestMatch.Groups['json'].Value | ConvertFrom-Json
+    $act = Invoke-Mcp 3 'tools/call' @{
+        name = 'pc_act'
+        arguments = @{
+            frame_id = [long]$observedManifest.frame_id
+            actions = @(@{ type = 'relative_move'; x = 0; y = 0 })
+            settle_ms = 0
+            observe_after = $true
+        }
+    }
+    $stop = Invoke-Mcp 4 'tools/call' @{ name = 'pc_stop'; arguments = @{} }
 }
 finally {
     $process.StandardInput.Close()
@@ -61,6 +84,9 @@ if ($observe.result.isError) {
 }
 if ($stop.result.isError) {
     throw "Control stop failed: $((@($stop.result.content | Where-Object type -eq 'text').text) -join ' ')"
+}
+if ($act.result.isError) {
+    throw "No-op action failed: $((@($act.result.content | Where-Object type -eq 'text').text) -join ' ')"
 }
 if ($process.ExitCode -ne 0) {
     throw "The driver exited with code $($process.ExitCode)."
@@ -92,6 +118,7 @@ if ([string]$initialize.result.serverInfo.version -ne $pluginVersion) {
     Displays = $displayCount
     Images = $imageCount
     ActiveObserve = 'passed'
+    SettledAction = 'passed'
     Stop = 'passed'
     ProcessExit = $process.ExitCode
 }

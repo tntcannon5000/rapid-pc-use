@@ -7,15 +7,17 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $productProject = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
 $probeProject = Join-Path $root 'tools\InputApiProbe\InputApiProbe.csproj'
+$performanceFixtureProject = Join-Path $root 'tools\PerformanceFixture\PerformanceFixture.csproj'
+$securityTestsProject = Join-Path $root 'tests\RapidPcUse.SecurityTests\RapidPcUse.SecurityTests.csproj'
+$agentTestsProject = Join-Path $root 'tests\RapidPcUse.AgentTests\RapidPcUse.AgentTests.csproj'
+$benchmarkTests = Join-Path $root 'tests\BenchmarkSupport.Tests.ps1'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
-$archive = Join-Path $root 'dist\rapid-pc-use-win-x64.zip'
-$checksum = "$archive.sha256"
 
 & (Join-Path $PSScriptRoot 'build.ps1')
 if ($LASTEXITCODE -ne 0) {
-    throw 'Release build failed.'
+    throw 'Verification build failed.'
 }
 
 $sdkVersion = [string]((Get-Content -Raw -LiteralPath (Join-Path $root 'global.json') | ConvertFrom-Json).sdk.version)
@@ -40,22 +42,39 @@ if ($null -eq $dotnet) {
     throw "The pinned .NET SDK $sdkVersion was not found after the build."
 }
 
-foreach ($project in @($productProject, $probeProject)) {
+foreach ($project in @($productProject, $probeProject, $performanceFixtureProject, $securityTestsProject, $agentTestsProject)) {
     & $dotnet build $project -c Release --nologo -p:AnalysisLevel=latest-recommended
     if ($LASTEXITCODE -ne 0) {
         throw "Strict analyzer build failed: $project"
     }
 }
 
-foreach ($project in @($productProject, $probeProject)) {
+foreach ($project in @($productProject, $probeProject, $performanceFixtureProject, $securityTestsProject, $agentTestsProject)) {
     & $dotnet format $project --verify-no-changes --no-restore --verbosity minimal
     if ($LASTEXITCODE -ne 0) {
         throw "Formatting verification failed: $project"
     }
 }
 
+& $dotnet run --project $securityTestsProject -c Release --no-build
+if ($LASTEXITCODE -ne 0) {
+    throw 'Security regression tests failed.'
+}
+
+& $dotnet run --project $agentTestsProject -c Release --no-build
+if ($LASTEXITCODE -ne 0) {
+    throw 'PC agent regression tests failed.'
+}
+
+& $benchmarkTests
+
 $parseErrors = @()
-foreach ($script in (Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File)) {
+$scriptFiles = @(
+    Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File
+    Get-ChildItem -LiteralPath (Join-Path $root 'agent_install') -Filter '*.ps1' -File
+    Get-ChildItem -LiteralPath (Join-Path $root 'tests') -Filter '*.ps1' -File
+)
+foreach ($script in $scriptFiles) {
     $tokens = $null
     $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
@@ -118,7 +137,7 @@ foreach ($requiredFile in @(
     (Join-Path $plugin 'DOTNET-THIRD-PARTY-NOTICES.txt')
 )) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
-        throw "Required release file is missing: $requiredFile"
+        throw "Required build file is missing: $requiredFile"
     }
 }
 
@@ -127,41 +146,6 @@ if (-not $SkipSmoke) {
     $smoke = & (Join-Path $PSScriptRoot 'smoke.ps1')
     if ($LASTEXITCODE -ne 0) {
         throw 'Active-control smoke verification failed.'
-    }
-}
-
-& (Join-Path $PSScriptRoot 'package.ps1') -SkipBuild
-if ($LASTEXITCODE -ne 0) {
-    throw 'Release packaging failed.'
-}
-if (-not (Test-Path -LiteralPath $archive -PathType Leaf) -or -not (Test-Path -LiteralPath $checksum -PathType Leaf)) {
-    throw 'The release archive or checksum file was not created.'
-}
-$expectedHash = ((Get-Content -LiteralPath $checksum -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
-$actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($expectedHash -ne $actualHash) {
-    throw "Package checksum mismatch: expected $expectedHash, got $actualHash."
-}
-
-$archiveEntries = @(& tar.exe -tf $archive)
-if ($LASTEXITCODE -ne 0) {
-    throw 'The release archive could not be read.'
-}
-$requiredEntries = @(
-    'CHANGELOG.md',
-    'LICENSE',
-    'README.md',
-    'SECURITY.md',
-    'plugin/rapid-pc-use/.codex-plugin/plugin.json',
-    'plugin/rapid-pc-use/bin/win-x64/rapid-pc-use.exe',
-    'plugin/rapid-pc-use/DOTNET-LICENSE.txt',
-    'plugin/rapid-pc-use/DOTNET-THIRD-PARTY-NOTICES.txt',
-    'scripts/install.ps1',
-    'scripts/smoke.ps1'
-)
-foreach ($entry in $requiredEntries) {
-    if ($archiveEntries -notcontains $entry) {
-        throw "The release archive is missing '$entry'."
     }
 }
 
@@ -179,6 +163,6 @@ if ($LASTEXITCODE -ne 0) {
     Sdk = $sdkVersion
     ExecutableMiB = [Math]::Round((Get-Item -LiteralPath $executable).Length / 1MB, 1)
     Displays = if ($null -eq $smoke) { 'skipped' } else { $smoke.Displays }
-    PackageSha256 = $actualHash
-    Result = 'release verification passed'
+    ExecutableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    Result = 'verification passed'
 }
