@@ -6,6 +6,8 @@ namespace RapidPcUse;
 
 internal sealed class DesktopController : IPcDesktop, IDisposable
 {
+    private const double SettledFrameDifferenceThreshold = 0.001;
+    private static readonly int[] RepaintBackoffMilliseconds = [10, 20, 40, 80, 160];
     private readonly InputController _input = new();
     private readonly IScreenCaptureBackend _capture;
     private readonly TimeProvider _timeProvider;
@@ -17,6 +19,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     private DateTimeOffset _lastFrameTimestampUtc;
     private string? _lastTopologyKey;
     private Dictionary<string, byte[]>? _lastFrameFingerprints;
+    private IReadOnlyList<MonitorDescriptor>? _lastActionSurfaces;
+    private bool _captureActiveWindow;
 
     internal DesktopController(IScreenCaptureBackend? capture = null, TimeProvider? timeProvider = null)
     {
@@ -28,6 +32,12 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     }
 
     internal Observation Observe(bool beginControl)
+        => ObserveCore(beginControl, captureActiveWindow: false);
+
+    internal Observation ObserveActiveWindow(bool beginControl)
+        => ObserveCore(beginControl, captureActiveWindow: true);
+
+    private Observation ObserveCore(bool beginControl, bool captureActiveWindow)
     {
         if (!beginControl)
         {
@@ -35,6 +45,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         }
 
         _session.Start();
+        _captureActiveWindow = captureActiveWindow;
         var operation = _session.BeginOperation();
         Action checkOperation = () => _session.ThrowIfCannotContinue(operation);
         return CaptureAndRemember(checkOperation);
@@ -43,7 +54,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     internal DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
     {
         var monitors = MonitorManager.GetMonitors();
-        ValidateActionPlan(actions, settleMilliseconds, monitors);
+        var actionSurfaces = _lastActionSurfaces ?? monitors;
+        ValidateActionPlan(actions, settleMilliseconds, actionSurfaces);
         ValidateFrame(frameId);
 
         var operation = _session.BeginOperation();
@@ -69,7 +81,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             try
             {
                 checkOperation();
-                ExecuteAction(action, monitors, checkOperation);
+                ExecuteAction(action, actionSurfaces, checkOperation);
                 checkOperation();
             }
             catch (UserTakeoverException)
@@ -135,6 +147,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     public void ThrowIfControlLost() => _session.ThrowIfControlLost();
 
     Observation IPcDesktop.Observe(bool beginControl) => Observe(beginControl);
+
+    Observation IPcDesktop.ObserveActiveWindow(bool beginControl) => ObserveActiveWindow(beginControl);
 
     DesktopActResult IPcDesktop.Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
         => Act(frameId, actions, settleMilliseconds, observeAfter);
@@ -255,7 +269,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                         var interval = OptionalBoundedInt(
                             action,
                             "interval_ms",
-                            2,
+                            0,
                             0,
                             SecurityLimits.MaxTypeIntervalMilliseconds);
                         estimatedMilliseconds += (long)text.Length * interval;
@@ -300,11 +314,14 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     {
         checkOperation();
         var frameId = Interlocked.Increment(ref _frameSequence);
-        var observation = _capture.Capture(frameId, _session.IsActive);
+        var observation = _captureActiveWindow
+            ? _capture.CaptureActiveWindow(frameId, _session.IsActive)
+            : _capture.Capture(frameId, _session.IsActive);
         checkOperation();
         _lastFrameId = observation.FrameId;
         _lastFrameTimestampUtc = _timeProvider.GetUtcNow();
         _lastTopologyKey = observation.TopologyKey;
+        _lastActionSurfaces = observation.Frames.Select(frame => frame.Monitor).ToArray();
         _lastFrameFingerprints = observation.Frames.ToDictionary(
             frame => frame.Monitor.Id,
             frame => frame.ContentFingerprint ?? System.Security.Cryptography.SHA256.HashData(frame.Bytes),
@@ -320,18 +337,18 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
     {
         WaitCancellable(initialDelayMilliseconds, checkOperation);
         var observation = CaptureAndRemember(checkOperation);
-        if (prior is null || FingerprintsChanged(prior, _lastFrameFingerprints))
+        if (prior is null || FingerprintsMeaningfullyChanged(prior, _lastFrameFingerprints))
         {
             return observation;
         }
 
-        // Most Windows repaints arrive within one of these short backoffs. This
-        // replaces multi-second guessed waits while keeping the loop responsive.
-        foreach (var delay in new[] { 50, 100, 200 })
+        // Short exponential backoffs avoid taxing already-painted applications
+        // while ignoring tiny focus/caret differences from an unfinished repaint.
+        foreach (var delay in RepaintBackoffMilliseconds)
         {
             WaitCancellable(delay, checkOperation);
             observation = CaptureAndRemember(checkOperation);
-            if (FingerprintsChanged(prior, _lastFrameFingerprints))
+            if (FingerprintsMeaningfullyChanged(prior, _lastFrameFingerprints))
             {
                 break;
             }
@@ -340,7 +357,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         return observation;
     }
 
-    private static bool FingerprintsChanged(
+    private static bool FingerprintsMeaningfullyChanged(
         IReadOnlyDictionary<string, byte[]> prior,
         Dictionary<string, byte[]>? current)
     {
@@ -349,16 +366,25 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             return true;
         }
 
+        double difference = 0;
+        var samples = 0;
         foreach (var pair in prior)
         {
             if (!current.TryGetValue(pair.Key, out var candidate) ||
-                !pair.Value.AsSpan().SequenceEqual(candidate))
+                pair.Value.Length != candidate.Length)
             {
                 return true;
             }
+
+            for (var index = 0; index < pair.Value.Length; index++)
+            {
+                difference += Math.Abs(pair.Value[index] - candidate[index]) / 255d;
+            }
+
+            samples += pair.Value.Length;
         }
 
-        return false;
+        return samples > 0 && difference / samples >= SettledFrameDifferenceThreshold;
     }
 
     private void ValidateFrame(long frameId)
@@ -381,6 +407,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         _lastFrameTimestampUtc = default;
         _lastTopologyKey = null;
         _lastFrameFingerprints = null;
+        _lastActionSurfaces = null;
     }
 
     private void ExecuteAction(
@@ -448,9 +475,9 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     ScrollTicks(OptionalInt(action, "scroll_x", 0)));
                 break;
             case "type":
-                _input.TypeText(
+                InputController.TypeText(
                     RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction),
-                    OptionalInt(action, "interval_ms", 2),
+                    OptionalInt(action, "interval_ms", 0),
                     checkOperation);
                 break;
             case "key":
@@ -495,7 +522,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             ElapsedMicroseconds(startTimestamp),
             type == "wait" ? SafeInteger(action, "ms") : null,
             type == "type" ? SafeString(action, "text")?.Length : null,
-            type == "type" ? SafeInteger(action, "interval_ms") ?? 2 : null);
+            type == "type" ? SafeInteger(action, "interval_ms") ?? 0 : null);
     }
 
     private static long ElapsedMicroseconds(long startTimestamp)

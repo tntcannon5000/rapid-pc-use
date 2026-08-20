@@ -12,6 +12,7 @@ internal static class NativeMethods
 
     internal const uint Srccopy = 0x00CC0020;
     internal const uint CaptureBlt = 0x40000000;
+    internal const uint Blackness = 0x00000042;
     internal const uint DiNormal = 0x0003;
     internal const int CursorShowing = 0x00000001;
 
@@ -74,6 +75,7 @@ internal static class NativeMethods
     internal static readonly UIntPtr InputSentinel = new(0x52504355);
 
     internal delegate bool MonitorEnumProc(nint monitor, nint hdc, ref Rect rect, nint data);
+    internal delegate bool WindowEnumProc(nint window, nint data);
     internal delegate nint LowLevelKeyboardProc(int code, nint wParam, nint lParam);
     internal delegate nint WindowProc(nint window, uint message, UIntPtr wParam, nint lParam);
 
@@ -252,6 +254,10 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool PatBlt(nint dc, int x, int y, int width, int height, uint operation);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DeleteDC(nint dc);
 
     [DllImport("gdi32.dll")]
@@ -276,6 +282,28 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowRect(nint window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowVisible(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumChildWindows(nint parent, WindowEnumProc callback, nint data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetWindowTextLength(nint window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetWindowText(nint window, [Out] char[] text, int maximumCount);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern uint GetWindowThreadProcessId(nint window, out uint processId);

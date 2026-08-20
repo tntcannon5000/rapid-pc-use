@@ -11,6 +11,8 @@ $sdkVersion = '10.0.110'
 $sdkArchiveSha512 = '652eaabac68508925225ca4b3a4f7be0353ec69c40bff838a05709769e94b9013f8bf03ee396d0cabe8438508a83521b2ced1b23d3a3019b13c49d1feaf6b039'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $project = Join-Path $root 'src\RapidPcUse\RapidPcUse.csproj'
+$performanceFixtureProject = Join-Path $root 'tools\PerformanceFixture\PerformanceFixture.csproj'
+$performanceFixtureOutput = Join-Path $root "tools\PerformanceFixture\bin\$Runtime"
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $binRoot = [IO.Path]::GetFullPath((Join-Path $plugin 'bin'))
 $output = [IO.Path]::GetFullPath((Join-Path $binRoot $Runtime))
@@ -190,6 +192,21 @@ if (Test-Path -LiteralPath $backup) {
 }
 foreach ($entry in $redistributionFiles.GetEnumerator()) {
     Copy-Item -LiteralPath $entry.Key -Destination $entry.Value -Force
+}
+
+& $dotnet publish $performanceFixtureProject `
+    -c Release `
+    -r $Runtime `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o $performanceFixtureOutput `
+    --nologo
+if ($LASTEXITCODE -ne 0) {
+    throw 'Rapid PC Use performance fixture build failed.'
 }
 
 Write-Host "Built Rapid PC Use: $output" -ForegroundColor Green

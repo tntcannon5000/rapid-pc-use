@@ -43,5 +43,9 @@ internal static class Program
             Console.Error.WriteLine($"Rapid PC Use terminated: {exception.Message}");
             Environment.ExitCode = 1;
         }
+        finally
+        {
+            DriverLog.FlushAndStop(TimeSpan.FromSeconds(2));
+        }
     }
 }

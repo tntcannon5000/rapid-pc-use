@@ -189,7 +189,9 @@ internal sealed class OpenAiResponsesProvider : IPcModelProvider
         }
 
         var completed = Stopwatch.GetTimestamp();
+        var parseStarted = Stopwatch.GetTimestamp();
         var decision = PcAgentDecisionParser.Parse(functionName, functionArguments);
+        var parseCompleted = Stopwatch.GetTimestamp();
         return new PcModelTurnResult(
             decision,
             Name,
@@ -197,6 +199,8 @@ internal sealed class OpenAiResponsesProvider : IPcModelProvider
             payload.Length,
             request.Observation.Frames.Count,
             request.Observation.Frames.Sum(frame => frame.Bytes.Length),
+            ElapsedMicroseconds(parseStarted, parseCompleted),
+            new ProviderLocalStageTimings(0, 0, 0, ElapsedMicroseconds(started, requestBuilt)),
             new ProviderTurnTimings(
                 ElapsedMicroseconds(started, requestBuilt),
                 ElapsedMicroseconds(started, headersReceived),
@@ -221,6 +225,7 @@ internal sealed class OpenAiResponsesProvider : IPcModelProvider
         {
             writer.WriteStartObject();
             writer.WriteString("model", _options.Model);
+            writer.WriteString("service_tier", _options.ServiceTier);
             writer.WriteString("instructions", PcAgentPrompt.Instructions);
             writer.WriteBoolean("store", false);
             writer.WriteBoolean("stream", true);

@@ -12,10 +12,13 @@ namespace RapidPcUse;
 internal interface IScreenCaptureBackend
 {
     Observation Capture(long frameId, bool controlActive);
+
+    Observation CaptureActiveWindow(long frameId, bool controlActive) => Capture(frameId, controlActive);
 }
 
 internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
 {
+    private static int _imagingPipelineWarmed;
     private readonly CaptureTier _captureTier;
     private readonly int _jpegQuality;
 
@@ -23,18 +26,100 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
     {
         _captureTier = CaptureResolutionPolicy.ReadEnvironmentTier();
         _jpegQuality = ReadBoundedEnvironmentInteger("RAPID_PC_JPEG_QUALITY", 84, 35, 100);
+        TryWarmImagingPipeline(_jpegQuality);
     }
 
     public Observation Capture(long frameId, bool controlActive)
     {
-        var stopwatch = Stopwatch.StartNew();
         var monitors = MonitorManager.GetMonitors();
-        ValidateCaptureResources(monitors);
         var topologyKey = MonitorManager.GetTopologyKey(monitors);
-        var tasks = monitors.Select(monitor => Task.Run(() => CaptureMonitor(frameId, monitor))).ToArray();
-        Task.WaitAll(tasks);
-        var frames = tasks.Select(task => task.Result).ToArray();
-        return new Observation(frameId, topologyKey, frames, stopwatch.ElapsedMilliseconds, controlActive);
+        return CaptureRegions(frameId, controlActive, monitors, topologyKey, "full_desktop");
+    }
+
+    public Observation CaptureActiveWindow(long frameId, bool controlActive)
+    {
+        var monitors = MonitorManager.GetMonitors();
+        var topologyKey = MonitorManager.GetTopologyKey(monitors);
+        var region = GetActiveWindowRegion(monitors);
+        return region is null
+            ? CaptureRegions(frameId, controlActive, monitors, topologyKey, "full_desktop_fallback")
+            : CaptureRegions(frameId, controlActive, [region], topologyKey, "active_window");
+    }
+
+    private Observation CaptureRegions(
+        long frameId,
+        bool controlActive,
+        IReadOnlyList<MonitorDescriptor> regions,
+        string topologyKey,
+        string captureScope)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        ValidateCaptureResources(regions);
+        ScreenFrame[] frames;
+        if (regions.Count == 1)
+        {
+            frames = [CaptureMonitor(frameId, regions[0])];
+        }
+        else
+        {
+            var tasks = regions.Select(monitor => Task.Run(() => CaptureMonitor(frameId, monitor))).ToArray();
+            Task.WaitAll(tasks);
+            frames = tasks.Select(task => task.Result).ToArray();
+        }
+
+        return new Observation(frameId, topologyKey, frames, stopwatch.ElapsedMilliseconds, controlActive, captureScope);
+    }
+
+    internal static MonitorDescriptor? CreateActiveWindowRegion(
+        NativeMethods.Rect window,
+        IReadOnlyList<MonitorDescriptor> monitors)
+    {
+        if (monitors.Count == 0)
+        {
+            return null;
+        }
+
+        var virtualLeft = monitors.Min(monitor => monitor.Left);
+        var virtualTop = monitors.Min(monitor => monitor.Top);
+        var virtualRight = monitors.Max(monitor => checked(monitor.Left + monitor.Width));
+        var virtualBottom = monitors.Max(monitor => checked(monitor.Top + monitor.Height));
+        var left = Math.Max(window.Left, virtualLeft);
+        var top = Math.Max(window.Top, virtualTop);
+        var right = Math.Min(window.Right, virtualRight);
+        var bottom = Math.Min(window.Bottom, virtualBottom);
+        var width = right - left;
+        var height = bottom - top;
+        if (width < 64 || height < 64)
+        {
+            return null;
+        }
+
+        var primary = monitors.FirstOrDefault(monitor => monitor.IsPrimary);
+        var intersectsPrimary = primary is not null &&
+            left < primary.Left + primary.Width &&
+            right > primary.Left &&
+            top < primary.Top + primary.Height &&
+            bottom > primary.Top;
+        return new MonitorDescriptor(
+            "window-foreground",
+            "foreground-window",
+            left,
+            top,
+            width,
+            height,
+            intersectsPrimary);
+    }
+
+    private static MonitorDescriptor? GetActiveWindowRegion(IReadOnlyList<MonitorDescriptor> monitors)
+    {
+        var window = NativeMethods.GetForegroundWindow();
+        if (window == nint.Zero || !NativeMethods.IsWindowVisible(window) || NativeMethods.IsIconic(window) ||
+            !NativeMethods.GetWindowRect(window, out var rectangle))
+        {
+            return null;
+        }
+
+        return CreateActiveWindowRegion(rectangle, monitors);
     }
 
     internal static void ValidateCaptureResources(IReadOnlyList<MonitorDescriptor> monitors)
@@ -168,6 +253,81 @@ internal sealed class GdiScreenCaptureBackend : IScreenCaptureBackend
             }
 
             _ = NativeMethods.ReleaseDC(0, screenDc);
+        }
+    }
+
+    private static void TryWarmImagingPipeline(int jpegQuality)
+    {
+        if (Interlocked.Exchange(ref _imagingPipelineWarmed, 1) != 0)
+        {
+            return;
+        }
+
+        var screenDc = NativeMethods.GetDC(0);
+        nint memoryDc = 0;
+        nint bitmap = 0;
+        nint oldObject = 0;
+        try
+        {
+            if (screenDc == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Capture warmup GetDC failed.");
+            }
+
+            memoryDc = NativeMethods.CreateCompatibleDC(screenDc);
+            bitmap = NativeMethods.CreateCompatibleBitmap(screenDc, 1, 1);
+            if (memoryDc == 0 || bitmap == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Capture warmup surface allocation failed.");
+            }
+
+            oldObject = NativeMethods.SelectObject(memoryDc, bitmap);
+            if (!NativeMethods.PatBlt(memoryDc, 0, 0, 1, 1, NativeMethods.Blackness))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Capture warmup surface clear failed.");
+            }
+
+            var source = Imaging.CreateBitmapSourceFromHBitmap(
+                bitmap,
+                0,
+                Int32Rect.Empty,
+                BitmapSizeOptions.FromEmptyOptions());
+            source.Freeze();
+            _ = CreateContentFingerprint(source);
+            var encoder = new JpegBitmapEncoder { QualityLevel = jpegQuality };
+            encoder.Frames.Add(BitmapFrame.Create(source));
+            using var stream = new MemoryStream();
+            encoder.Save(stream);
+        }
+        catch (Exception exception) when (exception is Win32Exception or ExternalException or InvalidOperationException)
+        {
+            Interlocked.Exchange(ref _imagingPipelineWarmed, 0);
+            DriverLog.Warning(
+                "capture.warmup_failed",
+                "The in-memory capture pipeline warmup failed; the first real capture will initialize it instead.",
+                exception: exception);
+        }
+        finally
+        {
+            if (oldObject != 0 && memoryDc != 0)
+            {
+                _ = NativeMethods.SelectObject(memoryDc, oldObject);
+            }
+
+            if (bitmap != 0)
+            {
+                _ = NativeMethods.DeleteObject(bitmap);
+            }
+
+            if (memoryDc != 0)
+            {
+                _ = NativeMethods.DeleteDC(memoryDc);
+            }
+
+            if (screenDc != 0)
+            {
+                _ = NativeMethods.ReleaseDC(0, screenDc);
+            }
         }
     }
 

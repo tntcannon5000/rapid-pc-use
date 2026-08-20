@@ -129,7 +129,27 @@ internal static class PcAgentDecisionParser
             }
         }
 
-        return new ActDecision(actions.Clone(), ParseMemory(root), expectedChange, risks);
+        var completionGuardText = OptionalBoundedString(
+            root,
+            "completion_guard_text",
+            SecurityLimits.MaxAgentStateFieldCharacters);
+        var completionSummary = OptionalBoundedString(
+            root,
+            "completion_summary",
+            SecurityLimits.MaxAgentSummaryCharacters);
+        if (string.IsNullOrWhiteSpace(completionGuardText) != string.IsNullOrWhiteSpace(completionSummary))
+        {
+            throw new InvalidOperationException(
+                "completion_guard_text and completion_summary must either both be empty or both be populated.");
+        }
+
+        return new ActDecision(
+            actions.Clone(),
+            ParseMemory(root),
+            expectedChange,
+            risks,
+            completionGuardText,
+            completionSummary);
     }
 
     private static FinishDecision ParseFinish(JsonElement root)
@@ -173,6 +193,23 @@ internal static class PcAgentDecisionParser
         if (!value.TryGetProperty(property, out var element) || element.ValueKind != JsonValueKind.String)
         {
             throw new InvalidOperationException($"The model decision requires string field '{property}'.");
+        }
+
+        var result = element.GetString()!;
+        ValidateField(result, maximumLength);
+        return result;
+    }
+
+    private static string OptionalBoundedString(JsonElement value, string property, int maximumLength)
+    {
+        if (!value.TryGetProperty(property, out var element))
+        {
+            return "";
+        }
+
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"The model decision field '{property}' must be a string.");
         }
 
         var result = element.GetString()!;

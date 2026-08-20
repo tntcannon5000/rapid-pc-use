@@ -28,6 +28,8 @@ internal sealed class ReplayPcModelProvider(IEnumerable<PcAgentDecision> decisio
             0,
             request.Observation.Frames.Count,
             request.Observation.Frames.Sum(frame => frame.Bytes.Length),
+            0,
+            new ProviderLocalStageTimings(0, 0, 0, 0),
             new ProviderTurnTimings(0, elapsed, elapsed, elapsed, elapsed),
             new ProviderUsage(null, null, null, null)));
     }

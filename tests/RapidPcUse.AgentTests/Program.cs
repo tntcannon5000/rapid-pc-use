@@ -11,10 +11,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Codex-session provider is keyless, ephemeral, and current-frame only", CodexSessionRequestIsBounded),
     ("Codex-session provider completes a live keyless protocol turn when requested", CodexSessionLiveTurn),
     ("OpenAI requests are stateless and current-frame only", OpenAiRequestIsBounded),
+    ("OpenAI requests apply the configured service tier", OpenAiRequestUsesConfiguredServiceTier),
     ("OpenAI streaming returns one strict decision", OpenAiStreamingDecisionParses),
     ("provider failures do not expose response bodies", ProviderFailureIsRedacted),
     ("truncated provider streams fail closed", TruncatedProviderStreamFailsClosed),
     ("agent loop completes through replay provider", ReplayLoopCompletes),
+    ("local completion guard eliminates the final model barrier", CompletionGuardEliminatesFinalModelBarrier),
+    ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
@@ -29,6 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("physical Escape cancels an in-flight provider call", TakeoverCancelsProvider),
     ("physical Escape returns the canonical signal to the outer MCP caller", TakeoverReturnsToOuterMcp),
     ("decision state limits reject image retention", StateLimitsRejectImageData),
+    ("parallel capture telemetry reports wall time separately", ParallelCaptureTelemetryUsesWallTime),
 };
 
 var failures = new List<string>();
@@ -50,7 +54,9 @@ foreach (var failure in failures)
     Console.Error.WriteLine(failure);
 }
 
-return failures.Count == 0 ? 0 : 1;
+var exitCode = failures.Count == 0 ? 0 : 1;
+DriverLog.FlushAndStop(TimeSpan.FromSeconds(2));
+return exitCode;
 
 static Task CodexSessionRequestIsBounded()
 {
@@ -149,6 +155,40 @@ static Task OpenAiRequestIsBounded()
     return Task.CompletedTask;
 }
 
+static Task OpenAiRequestUsesConfiguredServiceTier()
+{
+    var options = Options() with { ServiceTier = "flex" };
+    using var provider = new OpenAiResponsesProvider("test-key", options, new HttpClient(new NeverSendHandler()));
+    var payload = provider.BuildRequest(new PcModelTurnRequest(
+        "Open the harmless fixture.",
+        Scope(),
+        AgentWorkingState.Empty,
+        [],
+        Observation(1, [1]),
+        1,
+        10,
+        null));
+    using var document = JsonDocument.Parse(payload);
+    Assert(document.RootElement.GetProperty("service_tier").GetString() == "flex",
+        "the direct Responses request ignored the configured service tier");
+    return Task.CompletedTask;
+}
+
+static Task ParallelCaptureTelemetryUsesWallTime()
+{
+    var observation = new Observation(
+        1,
+        "fixture",
+        [FrameWithCaptureMicroseconds(70_000), FrameWithCaptureMicroseconds(80_000)],
+        85,
+        true);
+    Assert(AgentTelemetry.CaptureWallMicroseconds(observation) == 85_000,
+        "parallel capture telemetry summed workers instead of reporting elapsed wall time");
+    Assert(observation.Frames.Sum(frame => frame.Timings.TotalMicroseconds) == 150_000,
+        "the telemetry fixture does not distinguish worker time from wall time");
+    return Task.CompletedTask;
+}
+
 static async Task OpenAiStreamingDecisionParses()
 {
     const string arguments = "{\"summary\":\"Done\",\"memory\":\"Visible result\",\"visible_evidence\":\"Fixture is open\"}";
@@ -215,7 +255,74 @@ static Task ReplayLoopCompletes()
     var result = loop.Run(Request(maxNoProgress: 3));
     Assert(result.Status == PcAgentStatus.Completed, "run did not complete");
     Assert(result.ActionsExecuted == 1 && desktop.ActionBatches.Count == 1, "expected action was not executed exactly once");
+    Assert(desktop.ActiveWindowObserveCount == 1, "agent loop did not begin from an active-window observation");
     Assert(desktop.StopCount == 1, "desktop control was not released");
+    return Task.CompletedTask;
+}
+
+static Task CompletionGuardEliminatesFinalModelBarrier()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(
+            actions.RootElement.Clone(),
+            state,
+            "Completion banner appears",
+            new HashSet<PcRiskFlag>(),
+            "FIXTURE COMPLETE",
+            "Fixture completed."),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    var verifier = new FixedCompletionGuardVerifier(matched: true);
+    using var loop = new PcAgentLoop(
+        desktop,
+        provider,
+        Options(),
+        new FixedWindowInspector(),
+        completionGuard: verifier);
+
+    var result = loop.Run(Request(maxNoProgress: 3));
+
+    Assert(result.Status == PcAgentStatus.Completed, "matching completion guard did not finish the run");
+    Assert(result.ModelTurns == 1, "completion guard did not eliminate the final model turn");
+    Assert(result.Summary == "Fixture completed.", "completion guard summary was not returned");
+    Assert(verifier.Calls == 1, "completion guard was not evaluated exactly once");
+    Assert(desktop.ActionBatches.Count == 1, "guarded action batch did not execute exactly once");
+    return Task.CompletedTask;
+}
+
+static Task UnmatchedCompletionGuardFallsBack()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(
+            actions.RootElement.Clone(),
+            state,
+            "Completion banner appears",
+            new HashSet<PcRiskFlag>(),
+            "FIXTURE COMPLETE",
+            "Fixture completed."),
+        new FinishDecision("Fixture verified by the model.", state, "Target changed"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    var verifier = new FixedCompletionGuardVerifier(matched: false);
+    using var loop = new PcAgentLoop(
+        desktop,
+        provider,
+        Options(),
+        new FixedWindowInspector(),
+        completionGuard: verifier);
+
+    var result = loop.Run(Request(maxNoProgress: 3));
+
+    Assert(result.Status == PcAgentStatus.Completed, "unmatched completion guard blocked normal completion");
+    Assert(result.ModelTurns == 2, "unmatched completion guard did not fall back to model verification");
+    Assert(result.Summary == "Fixture verified by the model.", "fallback model summary was not returned");
+    Assert(verifier.Calls == 1, "unmatched completion guard was not evaluated exactly once");
     return Task.CompletedTask;
 }
 
@@ -558,6 +665,14 @@ static Observation Observation(long frameId, byte[] bytes)
         true);
 }
 
+static ScreenFrame FrameWithCaptureMicroseconds(long totalMicroseconds)
+{
+    var monitor = new MonitorDescriptor("display-1", "fixture", 0, 0, 1280, 720, true);
+    var resolution = new CaptureResolution(1280, 720, 720, "16:9", false);
+    var timings = new CaptureStageTimings(0, 0, 0, 0, 0, 0, totalMicroseconds);
+    return new ScreenFrame(1, monitor, 1280, 720, "image/jpeg", [1], 0, resolution, timings);
+}
+
 static void Assert(bool condition, string message)
 {
     if (!condition)
@@ -606,6 +721,7 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
 
     internal List<JsonElement> ActionBatches { get; } = [];
     internal int StopCount { get; private set; }
+    internal int ActiveWindowObserveCount { get; private set; }
 
     public CancellationToken ControlCancellationToken => _control.Token;
 
@@ -620,6 +736,12 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
         _control = new CancellationTokenSource();
         _takeover = false;
         return _observations.Dequeue();
+    }
+
+    public Observation ObserveActiveWindow(bool beginControl)
+    {
+        ActiveWindowObserveCount++;
+        return Observe(beginControl);
     }
 
     public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
@@ -708,6 +830,8 @@ internal sealed class FlakyProvider(int failures) : IPcModelProvider
             0,
             1,
             1,
+            0,
+            new ProviderLocalStageTimings(0, 0, 0, 0),
             new ProviderTurnTimings(0, 0, 0, 0, 0),
             new ProviderUsage(0, 0, 0, 0)));
     }
@@ -720,6 +844,26 @@ internal sealed class FlakyProvider(int failures) : IPcModelProvider
 internal sealed class FixedWindowInspector : IForegroundWindowInspector
 {
     public string GetProcessName() => "fixture";
+}
+
+internal sealed class FixedCompletionGuardVerifier(bool matched) : ICompletionGuardVerifier
+{
+    internal int Calls { get; private set; }
+
+    public CompletionGuardResult Verify(string expectedText)
+    {
+        AssertExpectedText(expectedText);
+        Calls++;
+        return new CompletionGuardResult(matched, 1, 10, matched ? "matched" : "not_found");
+    }
+
+    private static void AssertExpectedText(string expectedText)
+    {
+        if (expectedText != "FIXTURE COMPLETE")
+        {
+            throw new InvalidOperationException("completion guard text was changed before verification");
+        }
+    }
 }
 
 internal sealed class NamedWindowInspector(string processName) : IForegroundWindowInspector

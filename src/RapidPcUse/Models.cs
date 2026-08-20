@@ -74,7 +74,8 @@ internal sealed record Observation(
     string TopologyKey,
     IReadOnlyList<ScreenFrame> Frames,
     long TotalMilliseconds,
-    bool ControlActive);
+    bool ControlActive,
+    string CaptureScope = "full_desktop");
 
 internal sealed class UserTakeoverException : Exception
 {

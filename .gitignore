@@ -1,5 +1,6 @@
 /.tools/
 /artifacts/
+/benchmark-results/
 /dist/
 /plugin/rapid-pc-use/bin/
 /src/**/bin/

@@ -10,7 +10,7 @@ namespace RapidPcUse.Agent.Providers;
 /// Codex retains ownership of ChatGPT authentication; this provider never reads,
 /// copies, or receives OAuth credentials.
 /// </summary>
-internal sealed class CodexAppServerProvider : IPcModelProvider
+internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcModelProvider
 {
     private const int RecycleAfterTurns = 96;
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(15);
@@ -18,6 +18,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
     private readonly string _codexPath;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private CodexConnection? _connection;
+    private string? _preparedThreadId;
     private int _successfulTurns;
     private bool _disposed;
 
@@ -30,6 +31,24 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
     public string Name => "codex-session";
 
     public string Model => _options.Model;
+
+    public async Task WarmAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
+            if (_preparedThreadId is null)
+            {
+                _preparedThreadId = await StartThreadAsync(connection, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     public async Task<PcModelTurnResult> DecideAsync(
         PcModelTurnRequest request,
@@ -52,10 +71,17 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
                     frameDirectory,
                     request.Observation.Frames,
                     cancellationToken).ConfigureAwait(false);
+                var framesStaged = Stopwatch.GetTimestamp();
                 var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-                var threadRequest = BuildThreadStartRequest(connection.NextId());
-                var threadResult = await connection.RequestAsync(threadRequest, cancellationToken).ConfigureAwait(false);
-                var threadId = ReadThreadId(threadResult);
+                var connectionReady = Stopwatch.GetTimestamp();
+                var threadId = _preparedThreadId;
+                _preparedThreadId = null;
+                if (threadId is null)
+                {
+                    threadId = await StartThreadAsync(connection, cancellationToken).ConfigureAwait(false);
+                }
+
+                var threadReady = Stopwatch.GetTimestamp();
                 var turnRequest = BuildTurnStartRequest(connection.NextId(), threadId, request, imagePaths);
                 var requestBuilt = Stopwatch.GetTimestamp();
                 var result = await connection.RunTurnAsync(
@@ -66,7 +92,9 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
                     cancellationToken).ConfigureAwait(false);
                 _successfulTurns++;
 
+                var parseStarted = Stopwatch.GetTimestamp();
                 var decision = PcAgentDecisionParser.ParseStructured(result.Output);
+                var parseCompleted = Stopwatch.GetTimestamp();
                 return new PcModelTurnResult(
                     decision,
                     Name,
@@ -74,6 +102,12 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
                     turnRequest.Length,
                     request.Observation.Frames.Count,
                     request.Observation.Frames.Sum(frame => frame.Bytes.Length),
+                    (long)(Stopwatch.GetElapsedTime(parseStarted, parseCompleted).TotalMilliseconds * 1_000),
+                    new ProviderLocalStageTimings(
+                        ElapsedMicroseconds(started, framesStaged),
+                        ElapsedMicroseconds(framesStaged, connectionReady),
+                        ElapsedMicroseconds(connectionReady, threadReady),
+                        ElapsedMicroseconds(threadReady, requestBuilt)),
                     result.Timings,
                     result.Usage);
             }
@@ -208,7 +242,17 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
     {
         _connection?.Dispose();
         _connection = null;
+        _preparedThreadId = null;
         _successfulTurns = 0;
+    }
+
+    private async Task<string> StartThreadAsync(
+        CodexConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var request = BuildThreadStartRequest(connection.NextId());
+        var result = await connection.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+        return ReadThreadId(result);
     }
 
     private static string ReadThreadId(JsonElement result)
@@ -223,6 +267,9 @@ internal sealed class CodexAppServerProvider : IPcModelProvider
 
         return id.GetString()!;
     }
+
+    private static long ElapsedMicroseconds(long started, long completed)
+        => (long)(Stopwatch.GetElapsedTime(started, completed).TotalMilliseconds * 1_000);
 
     private static string CreateFrameDirectory()
     {

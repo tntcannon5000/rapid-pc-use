@@ -5,6 +5,7 @@ namespace RapidPcUse;
 
 internal sealed class InputController
 {
+    private const int MaximumTextEventsPerBatch = 512;
     private readonly object _gate = new();
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly HashSet<string> _heldButtons = new(StringComparer.OrdinalIgnoreCase);
@@ -147,8 +148,20 @@ internal sealed class InputController
         }
     }
 
-    internal void TypeText(string text, int intervalMilliseconds, Action checkOperation)
+    internal static void TypeText(string text, int intervalMilliseconds, Action checkOperation)
     {
+        if (intervalMilliseconds == 0)
+        {
+            foreach (var batch in BuildTextInputBatches(text))
+            {
+                checkOperation();
+                SendInputs(batch);
+                checkOperation();
+            }
+
+            return;
+        }
+
         for (var index = 0; index < text.Length; index++)
         {
             checkOperation();
@@ -158,30 +171,43 @@ internal sealed class InputController
                 continue;
             }
 
-            switch (character)
+            var events = TextEvents(character);
+            SendInputs([events.Down, events.Up]);
+
+            Thread.Sleep(intervalMilliseconds);
+            checkOperation();
+        }
+    }
+
+    internal static IReadOnlyList<NativeMethods.Input[]> BuildTextInputBatches(string text)
+    {
+        var batches = new List<NativeMethods.Input[]>();
+        var pending = new List<NativeMethods.Input>(Math.Min(MaximumTextEventsPerBatch, text.Length * 2));
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
             {
-                case '\r':
-                case '\n':
-                    PressVirtualKey(0x0D);
-                    break;
-                case '\t':
-                    PressVirtualKey(0x09);
-                    break;
-                case '\b':
-                    PressVirtualKey(0x08);
-                    break;
-                default:
-                    SendUnicode(character, down: true);
-                    SendUnicode(character, down: false);
-                    break;
+                continue;
             }
 
-            if (intervalMilliseconds > 0)
+            if (pending.Count + 2 > MaximumTextEventsPerBatch)
             {
-                Thread.Sleep(intervalMilliseconds);
-                checkOperation();
+                batches.Add(pending.ToArray());
+                pending.Clear();
             }
+
+            var events = TextEvents(character);
+            pending.Add(events.Down);
+            pending.Add(events.Up);
         }
+
+        if (pending.Count > 0)
+        {
+            batches.Add(pending.ToArray());
+        }
+
+        return batches;
     }
 
     internal void PressChord(string chord, Action checkOperation)
@@ -288,12 +314,6 @@ internal sealed class InputController
                 _heldKeys.Remove(virtualKey);
             }
         }
-    }
-
-    private void PressVirtualKey(ushort virtualKey)
-    {
-        KeyDown(virtualKey);
-        KeyUp(virtualKey);
     }
 
     private static (int X, int Y) MapNormalizedPoint(MonitorDescriptor monitor, int x, int y)
@@ -420,26 +440,6 @@ internal sealed class InputController
         return (ushort)(mapped & 0xFF);
     }
 
-    private static void SendUnicode(char character, bool down)
-    {
-        var flags = NativeMethods.KeyeventfUnicode | (down ? 0 : NativeMethods.KeyeventfKeyup);
-        SendInputs([
-            new NativeMethods.Input
-            {
-                Type = NativeMethods.InputKeyboard,
-                Data = new NativeMethods.InputUnion
-                {
-                    Keyboard = new NativeMethods.KeyboardInput
-                    {
-                        ScanCode = character,
-                        Flags = flags,
-                        ExtraInfo = NativeMethods.InputSentinel,
-                    },
-                },
-            },
-        ]);
-    }
-
     private static void SendKeyboard(ushort virtualKey, bool down)
     {
         SendInputs([KeyboardEvent(virtualKey, down)]);
@@ -457,6 +457,28 @@ internal sealed class InputController
                 ExtraInfo = NativeMethods.InputSentinel,
             },
         },
+    };
+
+    private static NativeMethods.Input UnicodeEvent(char character, bool down) => new()
+    {
+        Type = NativeMethods.InputKeyboard,
+        Data = new NativeMethods.InputUnion
+        {
+            Keyboard = new NativeMethods.KeyboardInput
+            {
+                ScanCode = character,
+                Flags = NativeMethods.KeyeventfUnicode | (down ? 0 : NativeMethods.KeyeventfKeyup),
+                ExtraInfo = NativeMethods.InputSentinel,
+            },
+        },
+    };
+
+    private static (NativeMethods.Input Down, NativeMethods.Input Up) TextEvents(char character) => character switch
+    {
+        '\r' or '\n' => (KeyboardEvent(0x0D, down: true), KeyboardEvent(0x0D, down: false)),
+        '\t' => (KeyboardEvent(0x09, down: true), KeyboardEvent(0x09, down: false)),
+        '\b' => (KeyboardEvent(0x08, down: true), KeyboardEvent(0x08, down: false)),
+        _ => (UnicodeEvent(character, down: true), UnicodeEvent(character, down: false)),
     };
 
     private static void SendMouse(uint flags, uint data, int dx = 0, int dy = 0)

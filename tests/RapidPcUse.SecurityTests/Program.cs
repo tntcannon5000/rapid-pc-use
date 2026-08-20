@@ -11,11 +11,13 @@ var tests = new (string Name, Action Run)[]
     ("action batches enforce resource limits", ActionBatchesAreBounded),
     ("action validation reports recoverable numeric correction data", ActionValidationReportsCorrectionData),
     ("capture dimensions enforce resource limits", CaptureResourcesAreBounded),
+    ("active-window capture regions are clipped to the visible desktop", ActiveWindowRegionsAreClipped),
     ("capture resolution maps common aspect ratios to short-edge tiers", CaptureResolutionMapsAspectRatios),
     ("capture resolution preserves uncommon ratios and avoids upscaling", CaptureResolutionPreservesUncommonRatios),
     ("image context patch estimates are bounded and deterministic", ImagePatchEstimatesAreDeterministic),
     ("image context telemetry recognizes exact repeats without exposing hashes", ImageContextTelemetryRecognizesRepeats),
     ("diagnostics redact exception-controlled data", DiagnosticsAreRedacted),
+    ("zero-interval text builds bounded native input batches", TextInputBatchesAreBounded),
     ("bounded parser fuzz is deterministic", BoundedParserFuzz),
 };
 
@@ -133,6 +135,28 @@ static void ActionValidationReportsCorrectionData()
     throw new InvalidOperationException("Expected a recoverable action validation rejection.");
 }
 
+static void ActiveWindowRegionsAreClipped()
+{
+    var monitors = new[]
+    {
+        new MonitorDescriptor("display-0", "left", -1920, 0, 1920, 1080, false),
+        new MonitorDescriptor("display-1", "primary", 0, 0, 2560, 1440, true),
+    };
+    var region = GdiScreenCaptureBackend.CreateActiveWindowRegion(
+        new NativeMethods.Rect { Left = -2000, Top = -50, Right = 800, Bottom = 900 },
+        monitors);
+    var visible = region ?? throw new InvalidOperationException("visible window region was rejected");
+    Assert(visible.Id == "window-foreground", "window capture ID is unstable");
+    Assert(visible.Left == -1920 && visible.Top == 0, "window origin was not clipped");
+    Assert(visible.Width == 2720 && visible.Height == 900, "window dimensions were not clipped");
+    Assert(visible.IsPrimary, "primary-display intersection was lost");
+
+    var offscreen = GdiScreenCaptureBackend.CreateActiveWindowRegion(
+        new NativeMethods.Rect { Left = 3000, Top = 2000, Right = 3100, Bottom = 2100 },
+        monitors);
+    Assert(offscreen is null, "fully offscreen window should use the full-desktop fallback");
+}
+
 static void CaptureResourcesAreBounded()
 {
     var valid = new[] { new MonitorDescriptor("display-1", "device", 0, 0, 1920, 1080, true) };
@@ -151,7 +175,7 @@ static void CaptureResolutionMapsAspectRatios()
 {
     AssertResolution(1920, 1080, CaptureTier.Tier900, 1600, 900, "16:9");
     AssertResolution(2560, 1600, CaptureTier.Tier900, 1440, 900, "16:10");
-    AssertResolution(1366, 768, CaptureTier.Tier900, 1280, 720, "16:9");
+    AssertResolution(1366, 768, CaptureTier.Tier900, 1366, 768, "16:9");
     AssertResolution(3440, 1440, CaptureTier.Tier900, 2150, 900, "43:18");
     AssertResolution(5120, 1440, CaptureTier.Tier900, 3200, 900, "32:9");
     AssertResolution(1080, 1920, CaptureTier.Tier900, 900, 1600, "16:9");
@@ -227,6 +251,20 @@ static void DiagnosticsAreRedacted()
     Assert(!serialized.Contains("attacker_key", StringComparison.Ordinal), "arbitrary exception data leaked");
     Assert(serialized.Contains("action_index", StringComparison.Ordinal), "safe numeric metadata was lost");
     Assert(serialized.Contains("details_redacted", StringComparison.Ordinal), "redaction marker is missing");
+}
+
+static void TextInputBatchesAreBounded()
+{
+    var batches = InputController.BuildTextInputBatches(new string('A', 300));
+    Assert(batches.Count == 2, "300 UTF-16 code units should be split into two bounded batches");
+    Assert(batches[0].Length == 512 && batches[1].Length == 88, "text input batches have the wrong event counts");
+    Assert(batches.All(batch => batch.Length <= 512), "a text input batch exceeds the native-event bound");
+    var lineBreak = InputController.BuildTextInputBatches("A\r\nB").Single();
+    Assert(lineBreak.Length == 6, "CRLF should produce one Enter press between two Unicode characters");
+    Assert((lineBreak[0].Data.Keyboard.Flags & NativeMethods.KeyeventfUnicode) != 0, "text did not use Unicode input");
+    Assert(lineBreak[2].Data.Keyboard.VirtualKey == 0x0D && lineBreak[3].Data.Keyboard.VirtualKey == 0x0D,
+        "newline did not become an Enter down/up pair");
+    Assert((lineBreak[3].Data.Keyboard.Flags & NativeMethods.KeyeventfKeyup) != 0, "Enter key-up is missing");
 }
 
 static void BoundedParserFuzz()

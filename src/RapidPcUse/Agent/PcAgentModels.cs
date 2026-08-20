@@ -74,7 +74,9 @@ internal sealed record ActDecision(
     JsonElement Actions,
     AgentWorkingState NextState,
     string ExpectedChange,
-    IReadOnlySet<PcRiskFlag> RiskFlags)
+    IReadOnlySet<PcRiskFlag> RiskFlags,
+    string CompletionGuardText = "",
+    string CompletionSummary = "")
     : PcAgentDecision(PcAgentDecisionKind.Act, NextState);
 
 internal sealed record FinishDecision(
@@ -113,6 +115,12 @@ internal sealed record ProviderTurnTimings(
     long FirstDecisionDeltaMicroseconds,
     long DecisionCompleteMicroseconds);
 
+internal sealed record ProviderLocalStageTimings(
+    long ImageStageMicroseconds,
+    long ConnectionAcquireMicroseconds,
+    long SessionSetupMicroseconds,
+    long PayloadBuildMicroseconds);
+
 internal sealed record ProviderUsage(
     long? InputTokens,
     long? CachedInputTokens,
@@ -126,6 +134,8 @@ internal sealed record PcModelTurnResult(
     int RequestBytes,
     int ImageCount,
     int ImageBytes,
+    long ParseMicroseconds,
+    ProviderLocalStageTimings LocalTimings,
     ProviderTurnTimings Timings,
     ProviderUsage Usage);
 
@@ -150,6 +160,8 @@ internal interface IPcDesktop
 {
     Observation Observe(bool beginControl);
 
+    Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+
     DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter);
 
     CancellationToken ControlCancellationToken { get; }
@@ -166,4 +178,9 @@ internal interface IPcModelProvider : IDisposable
     string Model { get; }
 
     Task<PcModelTurnResult> DecideAsync(PcModelTurnRequest request, CancellationToken cancellationToken);
+}
+
+internal interface IWarmablePcModelProvider
+{
+    Task WarmAsync(CancellationToken cancellationToken);
 }

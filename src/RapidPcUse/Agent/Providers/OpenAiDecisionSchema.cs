@@ -32,6 +32,8 @@ internal static class OpenAiDecisionSchema
         writer.WritePropertyName("items");
         WriteRiskSchema(writer);
         writer.WriteEndObject();
+        WriteStringProperty(writer, "completion_guard_text", SecurityLimits.MaxAgentStateFieldCharacters);
+        WriteStringProperty(writer, "completion_summary", SecurityLimits.MaxAgentSummaryCharacters);
         WriteStringProperty(writer, "summary", SecurityLimits.MaxAgentSummaryCharacters);
         WriteStringProperty(writer, "visible_evidence", SecurityLimits.MaxAgentStateFieldCharacters);
         WriteStringProperty(writer, "operation_summary", SecurityLimits.MaxAgentConfirmationSummaryCharacters);
@@ -57,6 +59,8 @@ internal static class OpenAiDecisionSchema
             "memory",
             "expected_change",
             "risk_flags",
+            "completion_guard_text",
+            "completion_summary",
             "summary",
             "visible_evidence",
             "operation_summary",
@@ -115,8 +119,17 @@ internal static class OpenAiDecisionSchema
         writer.WritePropertyName("items");
         WriteRiskSchema(writer);
         writer.WriteEndObject();
+        WriteStringProperty(writer, "completion_guard_text", SecurityLimits.MaxAgentStateFieldCharacters);
+        WriteStringProperty(writer, "completion_summary", SecurityLimits.MaxAgentSummaryCharacters);
         writer.WriteEndObject();
-        WriteRequired(writer, "actions", "memory", "expected_change", "risk_flags");
+        WriteRequired(
+            writer,
+            "actions",
+            "memory",
+            "expected_change",
+            "risk_flags",
+            "completion_guard_text",
+            "completion_summary");
         writer.WriteBoolean("additionalProperties", false);
         writer.WriteEndObject();
     }

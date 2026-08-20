@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO;
 using System.Text;
@@ -10,13 +11,25 @@ internal static class DriverLog
 {
     private const long MaximumBytes = 4_000_000;
     private const int ArchiveCount = 3;
-    private static readonly object Gate = new();
+    private const int QueueCapacity = 4_096;
+    private const int MaximumBatchEntries = 256;
     private static readonly Mutex CrossProcessGate = new(false, @"Local\RapidPcUse.Log.v2");
+    private static readonly BlockingCollection<LogEntry> PendingEntries = new(
+        new ConcurrentQueue<LogEntry>(),
+        QueueCapacity);
+    private static readonly Thread WriterThread = new(WriterLoop)
+    {
+        IsBackground = true,
+        Name = "RapidPcUse.DriverLog",
+    };
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         WriteIndented = false,
     };
+    private static readonly UTF8Encoding Utf8NoBom = new(false);
+    private static int _shutdownStarted;
+    private static long _droppedEntries;
 
     internal static string FilePath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -25,6 +38,8 @@ internal static class DriverLog
 
     internal static string SessionId { get; } =
         $"{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Environment.ProcessId}-{Guid.NewGuid():N}"[..38];
+
+    static DriverLog() => WriterThread.Start();
 
     internal static string NewOperationId(string prefix)
         => $"{prefix}-{Guid.NewGuid():N}"[..Math.Min(prefix.Length + 13, prefix.Length + 33)];
@@ -56,7 +71,20 @@ internal static class DriverLog
         string? tool = null,
         string? failureId = null,
         object? data = null)
-        => Write("ERROR", eventName, message, operationId, tool, failureId, data, exception);
+        => Write("ERROR", eventName, message, operationId, tool, failureId, data, exception, synchronous: true);
+
+    internal static void FlushAndStop(TimeSpan timeout)
+    {
+        if (Interlocked.Exchange(ref _shutdownStarted, 1) == 0)
+        {
+            PendingEntries.CompleteAdding();
+        }
+
+        if (Thread.CurrentThread != WriterThread)
+        {
+            _ = WriterThread.Join(timeout);
+        }
+    }
 
     private static void Write(
         string level,
@@ -66,35 +94,31 @@ internal static class DriverLog
         string? tool,
         string? failureId,
         object? data,
-        Exception? exception)
+        Exception? exception,
+        bool synchronous = false)
     {
         try
         {
-            var entry = new Dictionary<string, object?>
+            var entry = new LogEntry(
+                DateTimeOffset.Now,
+                level,
+                eventName,
+                message,
+                operationId,
+                tool,
+                failureId,
+                data,
+                exception is null ? null : ExceptionDetails(exception));
+            if (synchronous)
             {
-                ["timestamp"] = DateTimeOffset.Now.ToString("O"),
-                ["level"] = level,
-                ["event"] = eventName,
-                ["message"] = message,
-                ["version"] = BuildInfo.Version,
-                ["pid"] = Environment.ProcessId,
-                ["session_id"] = SessionId,
-            };
-            AddIfPresent(entry, "operation_id", operationId);
-            AddIfPresent(entry, "tool", tool);
-            AddIfPresent(entry, "failure_id", failureId);
-            if (data is not null)
-            {
-                entry["data"] = data;
+                AppendBatch([entry]);
+                return;
             }
 
-            if (exception is not null)
+            if (!PendingEntries.TryAdd(entry))
             {
-                entry["error"] = ExceptionDetails(exception);
+                _ = Interlocked.Increment(ref _droppedEntries);
             }
-
-            var line = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
-            Append(line);
         }
         catch
         {
@@ -102,37 +126,102 @@ internal static class DriverLog
         }
     }
 
-    private static void Append(string line)
+    private static void WriterLoop()
     {
-        lock (Gate)
+        var batch = new List<LogEntry>(MaximumBatchEntries);
+        foreach (var entry in PendingEntries.GetConsumingEnumerable())
         {
-            var ownsMutex = false;
+            batch.Add(entry);
+            while (batch.Count < MaximumBatchEntries && PendingEntries.TryTake(out var pending))
+            {
+                batch.Add(pending);
+            }
+
+            var dropped = Interlocked.Exchange(ref _droppedEntries, 0);
+            if (dropped > 0)
+            {
+                batch.Add(new LogEntry(
+                    DateTimeOffset.Now,
+                    "WARN",
+                    "driver.log_entries_dropped",
+                    "The bounded diagnostics queue dropped entries because its writer could not keep up.",
+                    null,
+                    null,
+                    null,
+                    new { dropped_entries = dropped, queue_capacity = QueueCapacity },
+                    null));
+            }
+
             try
             {
-                try
-                {
-                    ownsMutex = CrossProcessGate.WaitOne(TimeSpan.FromMilliseconds(150));
-                }
-                catch (AbandonedMutexException)
-                {
-                    ownsMutex = true;
-                }
-
-                if (!ownsMutex)
-                {
-                    return;
-                }
-
-                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-                RotateIfNeeded();
-                File.AppendAllText(FilePath, line, new UTF8Encoding(false));
+                AppendBatch(batch);
             }
-            finally
+            catch
             {
-                if (ownsMutex)
-                {
-                    CrossProcessGate.ReleaseMutex();
-                }
+                // Diagnostics must never interfere with desktop control.
+            }
+
+            batch.Clear();
+        }
+    }
+
+    private static void AppendBatch(IReadOnlyList<LogEntry> entries)
+    {
+        var text = new StringBuilder(entries.Count * 512);
+        foreach (var entry in entries)
+        {
+            var serialized = new Dictionary<string, object?>
+            {
+                ["timestamp"] = entry.Timestamp.ToString("O"),
+                ["level"] = entry.Level,
+                ["event"] = entry.EventName,
+                ["message"] = entry.Message,
+                ["version"] = BuildInfo.Version,
+                ["pid"] = Environment.ProcessId,
+                ["session_id"] = SessionId,
+            };
+            AddIfPresent(serialized, "operation_id", entry.OperationId);
+            AddIfPresent(serialized, "tool", entry.Tool);
+            AddIfPresent(serialized, "failure_id", entry.FailureId);
+            if (entry.Data is not null)
+            {
+                serialized["data"] = entry.Data;
+            }
+
+            if (entry.Error is not null)
+            {
+                serialized["error"] = entry.Error;
+            }
+
+            text.AppendLine(JsonSerializer.Serialize(serialized, JsonOptions));
+        }
+
+        var ownsMutex = false;
+        try
+        {
+            try
+            {
+                ownsMutex = CrossProcessGate.WaitOne(TimeSpan.FromMilliseconds(150));
+            }
+            catch (AbandonedMutexException)
+            {
+                ownsMutex = true;
+            }
+
+            if (!ownsMutex)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+            RotateIfNeeded();
+            File.AppendAllText(FilePath, text.ToString(), Utf8NoBom);
+        }
+        finally
+        {
+            if (ownsMutex)
+            {
+                CrossProcessGate.ReleaseMutex();
             }
         }
     }
@@ -228,4 +317,15 @@ internal static class DriverLog
             entry[name] = value;
         }
     }
+
+    private sealed record LogEntry(
+        DateTimeOffset Timestamp,
+        string Level,
+        string EventName,
+        string Message,
+        string? OperationId,
+        string? Tool,
+        string? FailureId,
+        object? Data,
+        Dictionary<string, object?>? Error);
 }

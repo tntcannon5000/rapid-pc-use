@@ -9,6 +9,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-ProfilePercentile([double[]]$Values, [double]$Percentile) {
+    if ($Values.Count -eq 0) {
+        return $null
+    }
+
+    $ordered = @($Values | Sort-Object)
+    $index = [Math]::Max(0, [Math]::Ceiling($Percentile * $ordered.Count) - 1)
+    return [double]$ordered[$index]
+}
+
 if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
     throw "Rapid PC Use log not found: $LogPath"
 }
@@ -22,6 +32,15 @@ $entries = @(
         } |
         Where-Object { $null -ne $_ }
 )
+
+if ([string]::IsNullOrWhiteSpace($SessionId) -and -not [string]::IsNullOrWhiteSpace($AgentRunId)) {
+    $agentEntry = $entries |
+        Where-Object { $_.operation_id -eq $AgentRunId -and $_.event -like 'agent.*' } |
+        Select-Object -Last 1
+    if ($null -ne $agentEntry) {
+        $SessionId = [string]$agentEntry.session_id
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($SessionId)) {
     $SessionId = [string]($entries | Select-Object -Last 1).session_id
@@ -103,14 +122,36 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
     $agentEvents = @($session | Where-Object { $_.operation_id -eq $AgentRunId -and $_.event -like 'agent.*' })
     $agentCompleted = $agentEvents | Where-Object { $_.event -eq 'agent.run_completed' } | Select-Object -Last 1
     $providerEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.provider_completed' })
+    $policyEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.policy_evaluated' })
+    $completionGuardEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.completion_guard_evaluated' })
+    $routeEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.decision_routed' })
     $iterationEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.iteration_completed' })
+    $observationEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.observation_captured' })
     $recoveryEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.recovery' })
     if ($null -ne $agentCompleted) {
         $activeElapsedMs = [double]$agentCompleted.data.elapsed_ms
         $decisionMs = [double](($providerEvents | ForEach-Object { [double]$_.data.timings_us.decision_complete_microseconds / 1000 } | Measure-Object -Sum).Sum)
         $requestBuildMs = [double](($providerEvents | ForEach-Object { [double]$_.data.timings_us.request_build_microseconds / 1000 } | Measure-Object -Sum).Sum)
+        $parseMs = [double](($providerEvents | ForEach-Object { [double]$_.data.parse_us / 1000 } | Measure-Object -Sum).Sum)
+        $policyMs = [double](($policyEvents | ForEach-Object { [double]$_.data.elapsed_us / 1000 } | Measure-Object -Sum).Sum)
+        $completionGuardMs = [double](($completionGuardEvents | ForEach-Object { [double]$_.data.elapsed_us / 1000 } | Measure-Object -Sum).Sum)
+        $imageStageMs = [double](($providerEvents | ForEach-Object { [double]$_.data.local_timings_us.image_stage_microseconds / 1000 } | Measure-Object -Sum).Sum)
+        $connectionAcquireMs = [double](($providerEvents | ForEach-Object { [double]$_.data.local_timings_us.connection_acquire_microseconds / 1000 } | Measure-Object -Sum).Sum)
+        $sessionSetupMs = [double](($providerEvents | ForEach-Object { [double]$_.data.local_timings_us.session_setup_microseconds / 1000 } | Measure-Object -Sum).Sum)
+        $payloadBuildMs = [double](($providerEvents | ForEach-Object { [double]$_.data.local_timings_us.payload_build_microseconds / 1000 } | Measure-Object -Sum).Sum)
+        $preparationMs = [double](($routeEvents | ForEach-Object { [double]$_.data.preparation_us / 1000 } | Measure-Object -Sum).Sum)
+        $providerWallMs = [double](($routeEvents | ForEach-Object { [double]$_.data.provider_wall_us / 1000 } | Measure-Object -Sum).Sum)
+        $routeMs = [double](($routeEvents | ForEach-Object { [double]$_.data.route_us / 1000 } | Measure-Object -Sum).Sum)
+        $iterationValues = @($routeEvents | ForEach-Object { [double]$_.data.iteration_us / 1000 })
         $firstEventValues = @($providerEvents | ForEach-Object { [double]$_.data.timings_us.first_event_microseconds / 1000 })
         $firstDecisionValues = @($providerEvents | ForEach-Object { [double]$_.data.timings_us.first_decision_delta_microseconds / 1000 })
+        $outputFillValues = @($providerEvents | ForEach-Object {
+            $firstDecisionUs = [double]$_.data.timings_us.first_decision_delta_microseconds
+            $decisionCompleteUs = [double]$_.data.timings_us.decision_complete_microseconds
+            if ($firstDecisionUs -ge 0 -and $decisionCompleteUs -ge $firstDecisionUs) {
+                ($decisionCompleteUs - $firstDecisionUs) / 1000
+            }
+        })
         $actionMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.action_execution_us / 1000 } | Measure-Object -Sum).Sum)
         $settleMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.settle_elapsed_us / 1000 } | Measure-Object -Sum).Sum)
         $captureMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.capture_total_us / 1000 } | Measure-Object -Sum).Sum)
@@ -120,6 +161,12 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
         $reasoningTokens = [long](($providerEvents | ForEach-Object { [long]$_.data.usage.reasoning_tokens } | Measure-Object -Sum).Sum)
         $imageBytes = [long](($providerEvents | ForEach-Object { [long]$_.data.image_bytes } | Measure-Object -Sum).Sum)
         $actionsExecuted = [int]$agentCompleted.data.actions_executed
+        $initialObservation = $observationEvents |
+            Where-Object { $_.data.phase -eq 'initial' } |
+            Select-Object -First 1
+        $initialCaptureStages = if ($null -eq $initialObservation) { @() } else {
+            @($initialObservation.data.displays | ForEach-Object { $_.capture_timings_us })
+        }
         $agentProfile = [pscustomobject]@{
             RunId = $AgentRunId
             Status = [string]$agentCompleted.data.status
@@ -128,14 +175,50 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
             ModelTurns = [int]$agentCompleted.data.model_turns
             ActionsExecuted = $actionsExecuted
             ActiveElapsedMs = [Math]::Round($activeElapsedMs, 3)
+            DisplayCount = if ($null -eq $initialObservation) { $null } else { [int]$initialObservation.data.display_count }
+            CaptureScope = if ($null -eq $initialObservation) { $null } else { [string]$initialObservation.data.capture_scope }
+            DisplayTopology = if ($null -eq $initialObservation) { @() } else { @($initialObservation.data.displays) }
+            InitialCaptureMs = if ($null -eq $initialObservation) { $null } else {
+                [Math]::Round([double]$initialObservation.data.capture_total_us / 1000, 3)
+            }
+            InitialCaptureSurfaceSetupMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.surface_setup_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
+            InitialCaptureBlitMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.blit_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
+            InitialCaptureMaterializeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.materialize_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
+            InitialCaptureResizeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.resize_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
+            InitialCaptureEncodeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.encode_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
             ActionsPerSecond = if ($activeElapsedMs -le 0) { $null } else { [Math]::Round(1000 * $actionsExecuted / $activeElapsedMs, 3) }
             ActionsPerModelTurn = if ($providerEvents.Count -eq 0) { $null } else { [Math]::Round([double]$actionsExecuted / $providerEvents.Count, 3) }
             OuterMcpCallsAvoided = [Math]::Max(0, $providerEvents.Count - 1)
             TotalModelDecisionMs = [Math]::Round($decisionMs, 3)
             ModelDecisionPercent = if ($activeElapsedMs -le 0) { $null } else { [Math]::Round(100 * $decisionMs / $activeElapsedMs, 1) }
             TotalRequestBuildMs = [Math]::Round($requestBuildMs, 3)
+            TotalDecisionParseMs = [Math]::Round($parseMs, 3)
+            TotalPolicyEvaluationMs = [Math]::Round($policyMs, 3)
+            CompletionGuardChecks = $completionGuardEvents.Count
+            CompletionGuardMatches = @($completionGuardEvents | Where-Object { [bool]$_.data.matched }).Count
+            TotalCompletionGuardMs = [Math]::Round($completionGuardMs, 3)
+            TotalProviderImageStageMs = [Math]::Round($imageStageMs, 3)
+            TotalProviderConnectionAcquireMs = [Math]::Round($connectionAcquireMs, 3)
+            TotalProviderSessionSetupMs = [Math]::Round($sessionSetupMs, 3)
+            TotalProviderPayloadBuildMs = [Math]::Round($payloadBuildMs, 3)
+            TotalLoopPreparationMs = [Math]::Round($preparationMs, 3)
+            TotalProviderWallMs = [Math]::Round($providerWallMs, 3)
+            TotalDecisionRouteMs = [Math]::Round($routeMs, 3)
+            P50IterationMs = if ($iterationValues.Count -eq 0) { $null } else {
+                [Math]::Round((Get-ProfilePercentile $iterationValues 0.50), 3)
+            }
+            P95IterationMs = if ($iterationValues.Count -eq 0) { $null } else {
+                [Math]::Round((Get-ProfilePercentile $iterationValues 0.95), 3)
+            }
             MeanFirstEventMs = if ($firstEventValues.Count -eq 0) { $null } else { [Math]::Round(($firstEventValues | Measure-Object -Average).Average, 3) }
             MeanFirstDecisionDeltaMs = if ($firstDecisionValues.Count -eq 0) { $null } else { [Math]::Round(($firstDecisionValues | Measure-Object -Average).Average, 3) }
+            MeanOutputFillMs = if ($outputFillValues.Count -eq 0) { $null } else { [Math]::Round(($outputFillValues | Measure-Object -Average).Average, 3) }
+            P50OutputFillMs = if ($outputFillValues.Count -eq 0) { $null } else {
+                [Math]::Round((Get-ProfilePercentile $outputFillValues 0.50), 3)
+            }
+            P95OutputFillMs = if ($outputFillValues.Count -eq 0) { $null } else {
+                [Math]::Round((Get-ProfilePercentile $outputFillValues 0.95), 3)
+            }
             TotalActionExecutionMs = [Math]::Round($actionMs, 3)
             TotalSettleMs = [Math]::Round($settleMs, 3)
             TotalCaptureMs = [Math]::Round($captureMs, 3)

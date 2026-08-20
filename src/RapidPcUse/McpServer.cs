@@ -16,6 +16,7 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
         WriteIndented = false,
     };
     private static readonly string[] BeginControlRequired = ["begin_control"];
+    private static readonly string[] CaptureScopes = ["full_desktop", "active_window"];
     private readonly ContextTelemetry _contextTelemetry = new();
     private long _toolSequence;
     private long _lastToolResponseWrittenTimestamp;
@@ -325,7 +326,13 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
     private ToolOutcome Observe(JsonElement arguments)
     {
         var beginControl = OptionalBoolean(arguments, "begin_control", true);
-        var observation = desktop.Observe(beginControl);
+        var captureScope = OptionalString(arguments, "capture_scope", "full_desktop");
+        var observation = captureScope switch
+        {
+            "full_desktop" => desktop.Observe(beginControl),
+            "active_window" => desktop.ObserveActiveWindow(beginControl),
+            _ => throw new ArgumentException("capture_scope must be full_desktop or active_window."),
+        };
         var context = _contextTelemetry.Record(observation);
         return new ToolOutcome(ObservationResult(observation), ObservationLogData(observation, context));
     }
@@ -508,6 +515,7 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
     private static object ObservationLogData(Observation observation, ContextObservationMetric context) => new
     {
         frame_id = observation.FrameId,
+        capture_scope = observation.CaptureScope,
         control_active = observation.ControlActive,
         display_count = observation.Frames.Count,
         total_capture_ms = observation.TotalMilliseconds,
@@ -534,6 +542,7 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
         {
             frame_id = observation.FrameId,
             coordinate_space = "monitor-local normalized integers: x and y each range from 0 to 1000",
+            capture_scope = observation.CaptureScope,
             control_active = observation.ControlActive,
             total_capture_ms = observation.TotalMilliseconds,
             displays = observation.Frames.Select(frame => new
@@ -584,7 +593,7 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
         new Dictionary<string, object?>
         {
             ["name"] = "pc_observe",
-            ["description"] = "Capture every Windows display as separate images while showing the user an Esc takeover cue. begin_control must be true. Returns a single-use frame_id that expires after 30 seconds and exact display metadata. Coordinates for pc_act are normalized monitor-local integers from 0 to 1000.",
+            ["description"] = "Capture the Windows desktop or foreground window while showing the user an Esc takeover cue. begin_control must be true. Returns a single-use frame_id that expires after 30 seconds and exact capture-surface metadata. Coordinates for pc_act are normalized surface-local integers from 0 to 1000.",
             ["inputSchema"] = new Dictionary<string, object?>
             {
                 ["type"] = "object",
@@ -595,6 +604,12 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
                         ["type"] = "boolean",
                         ["const"] = true,
                         ["description"] = "Required. Acquire PC control and show the control overlay.",
+                    },
+                    ["capture_scope"] = new Dictionary<string, object?>
+                    {
+                        ["type"] = "string",
+                        ["enum"] = CaptureScopes,
+                        ["description"] = "Capture every display (default) or only the foreground window. The high-level pc_run loop uses active_window with automatic full-desktop fallback.",
                     },
                 },
                 ["required"] = BeginControlRequired,
@@ -790,7 +805,7 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
             ["scroll_y"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native vertical scroll delta. Positive scrolls down and negative scrolls up; roughly 100 units become one Windows wheel notch." },
             ["scroll_x"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native horizontal scroll delta. Positive scrolls right and negative scrolls left; roughly 100 units become one Windows wheel notch." },
             ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxTypedCodeUnitsPerAction, ["description"] = "Literal text typed as Unicode keystrokes, never clipboard paste." },
-            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; default 2 ms." },
+            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; default 0 ms. Use a positive delay only for a target known to drop rapid input." },
             ["keys"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxKeyChordCharacters, ["description"] = "Key or '+'-joined chord, e.g. CTRL+L, ENTER, ALT+F4." },
             ["ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds },
         };
@@ -1028,7 +1043,11 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
 
         if (tool == "pc_observe")
         {
-            return new { begin_control = OptionalBoolean(arguments, "begin_control", true) };
+            return new
+            {
+                begin_control = OptionalBoolean(arguments, "begin_control", true),
+                capture_scope = OptionalString(arguments, "capture_scope", "full_desktop"),
+            };
         }
 
         if (tool != "pc_act")
@@ -1201,6 +1220,14 @@ internal sealed class McpServer(IPcDesktop desktop, PcAgentLoop? agent, TextRead
         => arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
             : fallback;
+
+    private static string OptionalString(JsonElement arguments, string property, string fallback)
+        => arguments.ValueKind == JsonValueKind.Object &&
+            arguments.TryGetProperty(property, out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            value.GetString() is { Length: <= 128 } result
+                ? result
+                : fallback;
 
     private static bool IsValidRequestId(JsonElement id)
         => id.ValueKind switch

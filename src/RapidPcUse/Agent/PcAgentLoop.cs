@@ -14,6 +14,7 @@ internal sealed class PcAgentLoop : IDisposable
     private readonly IPcModelProvider _provider;
     private readonly PcAgentOptions _options;
     private readonly ActionPolicy _policy;
+    private readonly ICompletionGuardVerifier _completionGuard;
     private readonly TimeProvider _timeProvider;
     private readonly VisualMemory _visualMemory = new();
     private RunSession? _paused;
@@ -25,12 +26,14 @@ internal sealed class PcAgentLoop : IDisposable
         IPcModelProvider provider,
         PcAgentOptions options,
         IForegroundWindowInspector? windowInspector = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ICompletionGuardVerifier? completionGuard = null)
     {
         _desktop = desktop;
         _provider = provider;
         _options = options;
         _policy = new ActionPolicy(windowInspector ?? new ForegroundWindowInspector());
+        _completionGuard = completionGuard ?? new UiaCompletionGuardVerifier();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -172,7 +175,8 @@ internal sealed class PcAgentLoop : IDisposable
         var progress = new ProgressDetector();
         try
         {
-            Observation? observation = _desktop.Observe(beginControl: true);
+            Observation? observation = _desktop.ObserveActiveWindow(beginControl: true);
+            AgentTelemetry.ObservationCaptured(session.RunId, session.ModelTurns, "initial", observation);
             if (session.ExpectedTopologyKey is not null)
             {
                 if (!string.Equals(session.ExpectedTopologyKey, observation.TopologyKey, StringComparison.Ordinal))
@@ -205,6 +209,7 @@ internal sealed class PcAgentLoop : IDisposable
                         null);
                 }
 
+                var iterationStarted = Stopwatch.GetTimestamp();
                 var current = observation ?? throw new InvalidOperationException("The PC agent has no current observation.");
                 _visualMemory.Replace(current);
                 var turnRequest = new PcModelTurnRequest(
@@ -226,6 +231,7 @@ internal sealed class PcAgentLoop : IDisposable
                     _desktop.ControlCancellationToken);
 
                 PcModelTurnResult modelResult;
+                var providerStarted = Stopwatch.GetTimestamp();
                 try
                 {
                     modelResult = await DecideWithRecoveryAsync(
@@ -258,6 +264,7 @@ internal sealed class PcAgentLoop : IDisposable
                         null);
                 }
 
+                var providerCompleted = Stopwatch.GetTimestamp();
                 _desktop.ThrowIfControlLost();
                 session.ModelTurns++;
                 AgentTelemetry.ProviderCompleted(session.RunId, session.ModelTurns, modelResult);
@@ -269,6 +276,7 @@ internal sealed class PcAgentLoop : IDisposable
                 {
                     case FinishDecision finish:
                         session.State = finish.FinalState;
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "finished");
                         return Complete(
                             session,
                             PcAgentStatus.Completed,
@@ -278,6 +286,7 @@ internal sealed class PcAgentLoop : IDisposable
 
                     case BlockedDecision blocked:
                         session.State = blocked.FinalState;
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "blocked");
                         return Complete(
                             session,
                             PcAgentStatus.Blocked,
@@ -289,6 +298,7 @@ internal sealed class PcAgentLoop : IDisposable
                         session.State = confirmation.NextState;
                         if (session.ApprovedRisk == confirmation.Risk)
                         {
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_repeated");
                             return Complete(
                                 session,
                                 PcAgentStatus.Blocked,
@@ -297,13 +307,21 @@ internal sealed class PcAgentLoop : IDisposable
                                 null);
                         }
 
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_requested");
                         return Pause(session, confirmation.Risk, confirmation.OperationSummary, current.TopologyKey, segmentStarted);
 
                     case ActDecision act:
                         session.State = act.NextState;
+                        var policyStarted = Stopwatch.GetTimestamp();
                         var policy = _policy.Evaluate(act, session.Request.Scope, session.ApprovedRisk);
+                        AgentTelemetry.PolicyEvaluated(
+                            session.RunId,
+                            session.ModelTurns,
+                            act.Actions.GetArrayLength(),
+                            (long)(Stopwatch.GetElapsedTime(policyStarted).TotalMilliseconds * 1_000));
                         if (policy.BlockReason is not null)
                         {
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "policy_blocked");
                             return Complete(
                                 session,
                                 PcAgentStatus.Blocked,
@@ -314,6 +332,7 @@ internal sealed class PcAgentLoop : IDisposable
 
                         if (policy.ConfirmationRisk is PcRiskFlag risk)
                         {
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "policy_confirmation");
                             return Pause(session, risk, ConfirmationSummary(risk), current.TopologyKey, segmentStarted);
                         }
 
@@ -325,6 +344,7 @@ internal sealed class PcAgentLoop : IDisposable
                         var actionCount = act.Actions.GetArrayLength();
                         if (actionCount > session.Request.Limits.MaxActions - session.ActionsExecuted)
                         {
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_limit");
                             return Complete(
                                 session,
                                 PcAgentStatus.LimitReached,
@@ -336,7 +356,7 @@ internal sealed class PcAgentLoop : IDisposable
                         DesktopActResult actResult;
                         try
                         {
-                            actResult = _desktop.Act(frameId, act.Actions, settleMilliseconds: 35, observeAfter: true);
+                            actResult = _desktop.Act(frameId, act.Actions, settleMilliseconds: 0, observeAfter: true);
                         }
                         catch (PcActionPlanValidationException exception)
                         {
@@ -347,6 +367,7 @@ internal sealed class PcAgentLoop : IDisposable
                                 ValidationFeedback(exception)));
                             AgentTelemetry.ActionRejected(session.RunId, session.ModelTurns, exception);
                             observation = current;
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_rejected");
                             break;
                         }
                         catch (StaleFrameException)
@@ -357,7 +378,9 @@ internal sealed class PcAgentLoop : IDisposable
                                 ScreenChanged: false,
                                 act.ExpectedChange,
                                 "The frame became unusable before input. A fresh screenshot was captured; replan from it."));
-                            observation = _desktop.Observe(beginControl: true);
+                            observation = _desktop.ObserveActiveWindow(beginControl: true);
+                            AgentTelemetry.ObservationCaptured(session.RunId, session.ModelTurns, "frame_refresh", observation);
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "frame_refreshed");
                             break;
                         }
 
@@ -376,6 +399,7 @@ internal sealed class PcAgentLoop : IDisposable
                                 ScreenChanged: true,
                                 act.ExpectedChange,
                                 $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Continue from the current screenshot using a different approach."));
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_interrupted");
                             break;
                         }
 
@@ -385,6 +409,28 @@ internal sealed class PcAgentLoop : IDisposable
                             progressResult.ScreenChanged,
                             act.ExpectedChange));
                         AgentTelemetry.IterationCompleted(session.RunId, session.ModelTurns, actResult, progressResult);
+                        if (!string.IsNullOrWhiteSpace(act.CompletionGuardText))
+                        {
+                            var guardResult = _completionGuard.Verify(act.CompletionGuardText);
+                            AgentTelemetry.CompletionGuardEvaluated(session.RunId, session.ModelTurns, guardResult);
+                            if (guardResult.Matched)
+                            {
+                                RecordDecisionRoute(
+                                    session,
+                                    modelResult,
+                                    iterationStarted,
+                                    providerStarted,
+                                    providerCompleted,
+                                    "completion_guard_matched");
+                                return Complete(
+                                    session,
+                                    PcAgentStatus.Completed,
+                                    act.CompletionSummary,
+                                    segmentStarted,
+                                    session.Request.ReturnFinalScreenshot ? observation : null);
+                            }
+                        }
+
                         if (progressResult.ConsecutiveNoProgressTurns >= session.Request.Limits.MaxConsecutiveNoProgressTurns)
                         {
                             AgentTelemetry.Recovery(session.RunId, session.ModelTurns, "no_progress", 1);
@@ -396,6 +442,7 @@ internal sealed class PcAgentLoop : IDisposable
                             progress.ResetNoProgress();
                         }
 
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_completed");
                         break;
 
                     default:
@@ -631,6 +678,29 @@ internal sealed class PcAgentLoop : IDisposable
 
     private static long ElapsedMilliseconds(long started)
         => (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+    private static void RecordDecisionRoute(
+        RunSession session,
+        PcModelTurnResult modelResult,
+        long iterationStarted,
+        long providerStarted,
+        long providerCompleted,
+        string outcome)
+    {
+        var completed = Stopwatch.GetTimestamp();
+        AgentTelemetry.DecisionRouted(
+            session.RunId,
+            session.ModelTurns,
+            modelResult.Decision.Kind.ToString().ToLowerInvariant(),
+            outcome,
+            ElapsedMicroseconds(iterationStarted, providerStarted),
+            ElapsedMicroseconds(providerStarted, providerCompleted),
+            ElapsedMicroseconds(providerCompleted, completed),
+            ElapsedMicroseconds(iterationStarted, completed));
+    }
+
+    private static long ElapsedMicroseconds(long started, long completed)
+        => (long)(Stopwatch.GetElapsedTime(started, completed).TotalMilliseconds * 1_000);
 
     private sealed class RunSession(PcRunRequest request)
     {

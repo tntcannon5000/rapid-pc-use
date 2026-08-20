@@ -33,13 +33,15 @@ For a trusted, dedicated test machine only, `-EnableFastMode` is an explicit opt
 
 ## Hot path
 
+The active performance contract, measured baselines, and medium-horizon architecture plan live in [`docs/PERFORMANCE_ROADMAP.md`](./docs/PERFORMANCE_ROADMAP.md).
+
 When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. Rapid PC Use then owns the screenshot → model → native action loop inside the driver and returns a compact completion, blocker, limit, or confirmation result to the main Codex model. A rare confirmation continues through `pc_resume`.
 
 This does not change the user-facing control experience: the same border is visible for the full active run, the same client approval applies to the high-level native-control call, and physical **Escape** still releases input, hides the border, and returns immediately to the main Codex model. Completed or paused runs release control themselves.
 
 The compatible diagnostic/fallback path remains:
 
-1. `pc_observe` captures every display as an independent JPEG and returns a `frame_id`.
+1. `pc_observe` captures every display as independent JPEGs by default and returns a `frame_id`; pass `capture_scope: "active_window"` for the foreground window only.
 2. `pc_act` runs up to 32 deterministic native actions and returns the post-action screenshots in the same tool result.
 3. `pc_stop` releases ownership and all driver-held input.
 
@@ -47,7 +49,7 @@ Coordinates are monitor-local normalized integers from `0..1000`, so model-side 
 
 Action batches are validated completely before a frame is consumed or any native input executes, including display IDs, keys, buttons, coordinates, and resource bounds. A malformed batch returns `PC_ACTION_REJECTED` without releasing control. Scroll inputs use the computer-use model convention: approximately 100 delta units become one bounded Windows wheel notch, so an input such as `591` is safely normalized to six notches. A stale frame is refreshed automatically, while a partially interrupted native batch returns the completed prefix and a fresh screenshot so work can continue from visible state.
 
-The capture backend is isolated behind the host boundary and uses parallel GDI capture plus WIC JPEG encoding. Screenshots default to an aspect-aware 900-pixel short-edge tier: 16:9 becomes 1600x900, 16:10 becomes 1440x900, portrait targets are rotated equivalents, and ultrawide or uncommon displays retain their measured aspect. Displays with a short edge between 720 and 899 pixels use the 720 tier, while smaller displays are not upscaled. Set `RAPID_PC_CAPTURE_TIER` to `720`, `900`, or `native` before starting the driver to override the maximum tier. On the development machine, a warm 2560x1600 capture completes in roughly 65 ms; the intended next optimization is a drop-in DXGI Desktop Duplication backend with presentation-aware settling.
+The capture backend is isolated behind the host boundary and uses parallel GDI capture plus WIC JPEG encoding. High-level `pc_run` captures the foreground window, with automatic full-desktop fallback when no usable foreground window exists. The configured tier is a maximum short edge, not an upscaling target: the default 900 tier keeps smaller native windows at native resolution and reduces larger surfaces proportionally. Set `RAPID_PC_CAPTURE_TIER` to `720`, `900`, or `native` before starting the driver. A locally cleared 1×1 surface warms WPF imaging at process startup without capturing desktop content; measured first active-window capture fell from 136 ms to 15 ms. The intended next backend is DXGI Desktop Duplication with presentation-aware settling.
 
 ## Safety and failure behavior
 
@@ -63,9 +65,11 @@ ChatGPT Work in the desktop app can use the local plugin. Hosted ChatGPT Work on
 
 ## Internal model provider
 
-The high-level loop is advertised automatically and uses `gpt-5.6-luna`, low reasoning, and Codex fast mode by default. A persistent Codex app-server child reuses the user's saved ChatGPT sign-in; Codex owns and refreshes the session, while Rapid PC Use never reads, copies, or receives OAuth credentials. The optional direct OpenAI provider remains available for explicit Platform API-key configurations.
+The high-level loop is advertised automatically and uses `gpt-5.6-luna`, low reasoning, and Codex fast mode by default. A persistent Codex app-server child is warmed in the background and reuses the user's saved ChatGPT sign-in; Codex owns and refreshes the session, while Rapid PC Use never reads, copies, or receives OAuth credentials. The optional direct OpenAI provider remains available for explicit Platform API-key configurations.
 
-Every visual decision starts a fresh ephemeral Codex thread containing the stable controller instructions and schema, a maximum 2 KB structured working state, the last three bounded action outcomes, and only the current screenshot for each display. Screenshot files are deleted after the turn and the persistent app-server process is recycled after a bounded number of turns. Previous screenshots therefore never accumulate in the next model decision's context. Paused sessions retain no screenshot.
+Every visual decision uses a fresh ephemeral Codex thread containing the stable controller instructions and schema, a maximum 2 KB structured working state, the last three bounded action outcomes, and only the current screenshot for each captured surface. The first empty thread is prepared during background startup without task text or screenshots. Screenshot files are deleted after the turn and the persistent app-server process is recycled after a bounded number of turns. Previous screenshots therefore never accumulate in the next model decision's context. Paused sessions retain no screenshot.
+
+The inner controller is instructed to emit the longest deterministic program supported by the stable screen. If a terminal batch has a known exact visible success string, it can attach a completion guard and finish locally without a second model turn. Guard checks scan bounded native window text first and use UI Automation only as fallback; an unmatched or inaccessible guard returns to the normal screenshot/model loop.
 
 Configuration is read once when the driver starts:
 
@@ -111,7 +115,7 @@ Before committing, run the complete build, formatting, metadata, security-test, 
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, request and image sizes, time to response headers/first event/decision, token and prompt-cache counters supplied by the provider, policy outcomes, progress signals, and aggregate run timing. Messages, task text, model prose, state text, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
+Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, decision routing, token/cache counters, progress signals, and aggregate run timing. Messages, task text, model prose, state text, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
 
 Profile the latest driver session with:
 
@@ -121,4 +125,30 @@ powershell -ExecutionPolicy Bypass -File .\scripts\profile.ps1
 
 Use `-SessionId <id>` for an older session or `-Json` for machine-readable output. Pass `-CodexRolloutPath <rollout.jsonl>` to join numeric `token_count` events and report active-input growth, cached input, and uncached input without emitting prompt or screenshot content. The reported response-to-request gap is the exact client/model/orchestration interval visible to the driver: it begins after the previous MCP response is flushed and ends when the next request is read. Cumulative screenshot counts and 32-pixel patch estimates are deliberately labeled as upper bounds because the MCP server itself cannot observe whether its client retained, compacted, or pruned earlier tool results.
 
-When the session contains high-level runs, the profiler automatically selects the latest one. Use `-AgentRunId <run-id>` to select another. The agent section reports actions per second, actions per model turn, outer MCP calls avoided, request-build and model-decision time, first-event latency, native action/settle/capture time, provider token/cache counters, image bytes, visual-progress signals, and bounded recovery categories. `scripts/benchmark-matrix.ps1` runs the explicit Luna/Terra/Sol × none/low × 720p/900p live matrix through the saved Codex ChatGPT session against a user-supplied safe fixture task; it requires the explicit `-RunLive` switch.
+When the session contains high-level runs, the profiler automatically selects the latest one. Use `-AgentRunId <run-id>` to select another; this resolves the owning driver session even if another process wrote a newer log entry. The agent section reports actions per second, actions per model turn, display topology, outer MCP calls avoided, capture stages, provider-local stages, model stream milestones, parse/policy/routing time, native action/adaptive-settle time, completion-guard results, token/cache counters, image bytes, visual-progress signals, and bounded recovery categories.
+
+`scripts/benchmark-matrix.ps1` runs a seeded, repetition-balanced Luna/Terra/Sol × none/low × 720p/900p live matrix through the saved Codex ChatGPT session. It requires the explicit `-RunLive` switch, waits for background provider warm-up, gracefully flushes each process's telemetry, validates the camel-case `pc_run` result contract against that telemetry, and writes raw rows plus p50/p95 summaries to an ignored `benchmark-results` artifact. Use at least 20 repetitions for release comparisons.
+
+For publishable successful-APM results, pass `-FixtureScript` with a reviewed PowerShell fixture adapter. The script is called before and after every run with `-Phase Reset` or `-Phase Verify` plus `-FixtureId`, `-RunNumber`, `-Repetition`, `-Model`, `-Reasoning`, and `-CaptureTier`. Reset must restore a deterministic state. Verify must emit only a bounded result such as:
+
+```json
+{"success":true,"usefulActions":7}
+```
+
+A failed verification also supplies a bounded identifier, for example `{"success":false,"usefulActions":2,"failureCategory":"wrong_state"}`. Without this adapter the harness deliberately leaves success rate and successful APM null; model-reported completion and JSON action-object throughput are not treated as proof of useful work. Task text, screenshots, typed content, model output, and raw fixture output are excluded from benchmark artifacts.
+
+The repository includes `click-ladder-v1` and `form-tab-v1` as visible, deterministic Windows fixtures. Measure the no-model actuator/capture ceiling with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\actuator-baseline.ps1 -RunLocal -FixtureId form-tab-v1 -Repetitions 20 -WarmupRuns 1 -CaptureTier 900 -CaptureScope active_window
+```
+
+This path performs real keyboard/mouse input, verifies terminal fixture state independently, separates initial capture, action preparation, native dispatch, settle, and post-action capture, and writes raw rows plus percentiles to ignored `benchmark-results` JSON. It makes no model request.
+
+Record the skilled-human comparison on the identical fixture with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\human-baseline.ps1 -RunHuman -FixtureId form-tab-v1 -Repetitions 5
+```
+
+Run the click-ladder fixture separately rather than averaging unlike workloads. Human timing starts on the first accepted fixture input, so process launch and window activation do not inflate the muscle-memory rate.

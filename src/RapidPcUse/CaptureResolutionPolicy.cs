@@ -78,17 +78,12 @@ internal static class CaptureResolutionPolicy
 
     private static int SelectShortEdge(int nativeShortEdge, CaptureTier maximumTier)
     {
-        if (maximumTier == CaptureTier.Native || nativeShortEdge < (int)CaptureTier.Tier720)
+        if (maximumTier == CaptureTier.Native)
         {
             return nativeShortEdge;
         }
 
-        if (maximumTier == CaptureTier.Tier720 || nativeShortEdge < (int)CaptureTier.Tier900)
-        {
-            return (int)CaptureTier.Tier720;
-        }
-
-        return (int)CaptureTier.Tier900;
+        return Math.Min(nativeShortEdge, (int)maximumTier);
     }
 
     private static AspectRatio? FindKnownRatio(double aspect)
