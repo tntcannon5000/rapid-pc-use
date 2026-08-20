@@ -237,6 +237,18 @@ function New-RapidPcBenchmarkSummary {
         $actionExecutionValues = @($runs | Where-Object { $null -ne $_.TotalActionExecutionMs } | ForEach-Object { [double]$_.TotalActionExecutionMs })
         $firstDecisionValues = @($runs | Where-Object { $null -ne $_.MeanFirstDecisionDeltaMs } | ForEach-Object { [double]$_.MeanFirstDecisionDeltaMs })
         $outputFillValues = @($runs | Where-Object { $null -ne $_.MeanOutputFillMs } | ForEach-Object { [double]$_.MeanOutputFillMs })
+        $completionGuardCheckValues = @($runs | ForEach-Object {
+            $property = $_.PSObject.Properties['CompletionGuardChecks']
+            if ($null -ne $property -and $null -ne $property.Value) {
+                [int]$property.Value
+            }
+        })
+        $completionGuardMatchValues = @($runs | ForEach-Object {
+            $property = $_.PSObject.Properties['CompletionGuardMatches']
+            if ($null -ne $property -and $null -ne $property.Value) {
+                [int]$property.Value
+            }
+        })
 
         $summaries.Add([pscustomobject]@{
             Model = [string]$first.Model
@@ -286,8 +298,8 @@ function New-RapidPcBenchmarkSummary {
             P50PolicyEvaluationMs = if ($policyValues.Count -eq 0) { $null } else {
                 [Math]::Round((Get-RapidPcBenchmarkPercentile $policyValues 0.50), 3)
             }
-            CompletionGuardChecks = [int](($runs | Measure-Object CompletionGuardChecks -Sum).Sum)
-            CompletionGuardMatches = [int](($runs | Measure-Object CompletionGuardMatches -Sum).Sum)
+            CompletionGuardChecks = [int](($completionGuardCheckValues | Measure-Object -Sum).Sum)
+            CompletionGuardMatches = [int](($completionGuardMatchValues | Measure-Object -Sum).Sum)
             P50CompletionGuardMs = if ($completionGuardValues.Count -eq 0) { $null } else {
                 [Math]::Round((Get-RapidPcBenchmarkPercentile $completionGuardValues 0.50), 3)
             }
