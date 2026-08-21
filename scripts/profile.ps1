@@ -80,6 +80,7 @@ foreach ($completed in @($session | Where-Object { $_.event -eq 'tool.completed'
             RequestedWaitMs = $action.requested_wait_milliseconds
             TypedCodeUnits = $action.typed_code_units
             TypeIntervalMs = $action.type_interval_milliseconds
+            PointerPacingMs = $action.pointer_pacing_milliseconds
         })
     }
 
@@ -153,6 +154,9 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
             }
         })
         $actionMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.action_execution_us / 1000 } | Measure-Object -Sum).Sum)
+        $pointerPacingMs = [double](($iterationEvents | ForEach-Object {
+            $_.data.actions | ForEach-Object { [double]$_.pointer_pacing_milliseconds }
+        } | Measure-Object -Sum).Sum)
         $settleMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.settle_elapsed_us / 1000 } | Measure-Object -Sum).Sum)
         $captureMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.capture_total_us / 1000 } | Measure-Object -Sum).Sum)
         $inputTokens = [long](($providerEvents | ForEach-Object { [long]$_.data.usage.input_tokens } | Measure-Object -Sum).Sum)
@@ -220,6 +224,7 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
                 [Math]::Round((Get-ProfilePercentile $outputFillValues 0.95), 3)
             }
             TotalActionExecutionMs = [Math]::Round($actionMs, 3)
+            TotalPointerPacingMs = [Math]::Round($pointerPacingMs, 3)
             TotalSettleMs = [Math]::Round($settleMs, 3)
             TotalCaptureMs = [Math]::Round($captureMs, 3)
             InputTokens = $inputTokens

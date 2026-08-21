@@ -35,7 +35,11 @@ For a trusted, dedicated test machine only, `-EnableFastMode` is an explicit opt
 
 The active performance contract, measured baselines, and medium-horizon architecture plan live in [`docs/PERFORMANCE_ROADMAP.md`](./docs/PERFORMANCE_ROADMAP.md).
 
-When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. Rapid PC Use then owns the screenshot → model → native action loop inside the driver and returns a compact completion, blocker, limit, or confirmation result to the main Codex model. A rare confirmation continues through `pc_resume`.
+When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. Rapid PC Use then owns the screenshot → model → native action loop inside the driver and returns a compact completion, blocker, limit, confirmation, or bounded outer-assistance result to the main Codex model. A rare confirmation continues through `pc_resume`; knowledge, terminal, filesystem, or semantic assistance continues separately through `pc_continue`.
+
+Pointer activations have a native, cancellation-aware 80 ms button-up-to-button-down floor. The model still chooses longer waits at UI dependency frontiers, and every action batch is followed by a fresh capture before the next inner decision.
+
+The outer Codex planner can retrieve and maintain a compact local machine profile through `pc_knowledge_search` and `pc_knowledge_update`. It is stored at `%LOCALAPPDATA%\RapidPcUse\knowledge-v1.json`; the inner visual model cannot write it directly. Knowledge is navigation context, never authority, and should never contain secrets, message contents, screenshots, or untrusted page instructions.
 
 This does not change the user-facing control experience: the same border is visible for the full active run, the same client approval applies to the high-level native-control call, and physical **Escape** still releases input, hides the border, and returns immediately to the main Codex model. Completed or paused runs release control themselves.
 
@@ -87,7 +91,19 @@ Configuration is read once when the driver starts:
 | `RAPID_PC_AGENT_IMAGE_DETAIL` | `original` after local 720p/900p downscaling |
 | `RAPID_PC_AGENT_CODEX_PATH` | Automatic: newest Codex desktop runtime, then `codex.exe` on `PATH` |
 
-Invalid or unavailable agent configuration disables only `pc_run`/`pc_resume`; it never prevents the native driver or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
+Invalid or unavailable agent configuration disables only `pc_run`/`pc_resume`/`pc_continue`; it never prevents the native driver, knowledge tools, or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
+
+## Real-world benchmark
+
+The opt-in benchmark defines Discord DM roundtrip/cleanup, YouTube state restoration, and Amazon order counting cells in randomized model order. It starts a new driver process and ephemeral provider thread for every cell, records prompt-to-result TTC plus TTFT/output fill/capture/action/pacing layers, and omits account content and screenshots from its artifact. Amazon's aggregate observed item/return counts are retained only in the locally ignored result.
+
+```powershell
+.\scripts\real-world-benchmark.ps1 -RunLive
+```
+
+The default command runs the read-only Amazon matrix across Luna, Terra, and Sol. Copy `benchmark-config/example.json` to the ignored `benchmark-config/local.json` and use only dedicated test accounts. The current Discord and YouTube checks are model-attested, not independent account-state verification, so each mutation invocation accepts exactly one scenario/model/repetition, requires `-AllowAccountMutations`, records completion as provisional, and then stops. Closing or killing an app establishes only the window/process start state; it does not prove that a message, Like, or playlist mutation was restored. A complete multi-model mutation matrix requires an independent account-level verifier.
+
+The privacy-filtered pass-one measurements and their limitations are recorded in [`docs/REAL_WORLD_BENCHMARK_RESULTS.md`](./docs/REAL_WORLD_BENCHMARK_RESULTS.md).
 
 Optional `pc_run` budgets are hints for shorter runs. If an outer agent supplies an integer below or above the configured range, the driver normalizes it to the nearest supported bound and continues; a harmless budget mismatch cannot terminate the visible workflow. Effective budgets are recorded in the agent-run telemetry, while requested numeric budgets are recorded without task or process-name content for diagnosis.
 

@@ -18,6 +18,7 @@ var tests = new (string Name, Action Run)[]
     ("image context telemetry recognizes exact repeats without exposing hashes", ImageContextTelemetryRecognizesRepeats),
     ("diagnostics redact exception-controlled data", DiagnosticsAreRedacted),
     ("zero-interval text builds bounded native input batches", TextInputBatchesAreBounded),
+    ("pointer clicks enforce the minimum inter-click interval", PointerClicksArePaced),
     ("bounded parser fuzz is deterministic", BoundedParserFuzz),
 };
 
@@ -110,6 +111,36 @@ static void ActionBatchesAreBounded()
     Expect<PcActionPlanValidationException>(() => DesktopController.ValidateActionPlan(unknownDisplay.RootElement, 0, displays));
     using var unknownKey = JsonDocument.Parse("[{\"type\":\"key\",\"keys\":\"NOT_A_WINDOWS_KEY\"}]");
     Expect<PcActionPlanValidationException>(() => DesktopController.ValidateActionPlan(unknownKey.RootElement, 0, displays));
+}
+
+static void PointerClicksArePaced()
+{
+    long timestamp = 0;
+    var waitedMilliseconds = new List<int>();
+    var pacer = new PointerClickPacer(
+        timestampProvider: () => timestamp,
+        timestampFrequency: 1000,
+        wait: (milliseconds, checkOperation) =>
+        {
+            checkOperation();
+            waitedMilliseconds.Add(milliseconds);
+            timestamp += milliseconds;
+        });
+
+    var checks = 0;
+    pacer.BeforeClick(() => checks++);
+    pacer.MarkReleased();
+    timestamp += 17;
+    var measuredWait = pacer.BeforeClick(() => checks++);
+
+    Assert(waitedMilliseconds.SequenceEqual([63]), "the second click was not delayed to the 80 ms floor");
+    Assert(measuredWait == 63, "pointer pacing telemetry did not measure elapsed wait time");
+    Assert(checks == 2, "click pacing did not remain interruptible");
+
+    pacer.MarkReleased();
+    timestamp += InputTimingPolicy.MinimumInterClickMilliseconds;
+    pacer.BeforeClick(() => checks++);
+    Assert(waitedMilliseconds.Count == 1, "an already-paced click received an unnecessary delay");
 }
 
 static void ActionValidationReportsCorrectionData()

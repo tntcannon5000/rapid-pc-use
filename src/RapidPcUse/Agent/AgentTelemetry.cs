@@ -198,6 +198,7 @@ internal static class AgentTelemetry
     {
         PcAgentStatus.Completed => "completed",
         PcAgentStatus.NeedsConfirmation => "needs_confirmation",
+        PcAgentStatus.NeedsHandoff => "needs_handoff",
         PcAgentStatus.Blocked => "blocked",
         PcAgentStatus.LimitReached => "limit_reached",
         PcAgentStatus.Failed => "failed",

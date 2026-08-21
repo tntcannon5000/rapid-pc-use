@@ -38,6 +38,9 @@ internal static class SecurityLimits
     internal const int MaxAgentProviderErrorBytes = 16_384;
     internal const int MaxAgentOutputTokens = 1_024;
     internal const int MaxAgentConfirmationSummaryCharacters = 600;
+    internal const int MaxAgentHandoffRequestCharacters = 600;
+    internal const int MaxAgentOuterContextCharacters = 1_200;
     internal static readonly TimeSpan MaxFrameAge = TimeSpan.FromSeconds(30);
     internal static readonly TimeSpan AgentConfirmationLifetime = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan AgentHandoffLifetime = TimeSpan.FromMinutes(5);
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add native 80 ms pointer pacing, dependency-frontier action batching, and pacing telemetry.
+- Add resumable, authority-preserving outer assistance through `pc_continue`, with explicit untrusted-handoff boundaries.
+- Add dedicated remote-content-change policy without weakening independently inferred local-deletion risk.
+- Add a bounded, atomic, cross-process-locked local PC knowledge store and retrieval/update tools.
+- Add privacy-filtered Discord, YouTube, and Amazon real-world benchmark adapters with model-isolated runs, terminal takeover semantics, honest provisional verification, and residual-state aborts.
 - Replace the fixed maximum-edge screenshot resize with aspect-aware 720/900 short-edge tiers, including canonical 16:9, 16:10, portrait, and ultrawide mappings without upscaling small displays.
 - Add per-action, settle, capture-stage, MCP serialization, and response-to-request loop telemetry plus a local session profiler.
 - Add privacy-safe cumulative screenshot context estimates and exact-repeat counts while explicitly separating unavailable provider cache metrics.

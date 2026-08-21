@@ -1,0 +1,15 @@
+{
+  "discord": {
+    "contact": "replace-with-test-account",
+    "server": "replace-with-return-server",
+    "messagePrefix": "RPU-BENCH"
+  },
+  "youtube": {
+    "query": "replace-with-stable-video-query"
+  },
+  "amazon": {
+    "sinceDate": "2026-07-01",
+    "expectedItemCount": 0,
+    "expectedReturnedCount": 0
+  }
+}

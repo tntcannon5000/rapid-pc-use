@@ -5,6 +5,7 @@ using System.Text.Json;
 using RapidPcUse;
 using RapidPcUse.Agent;
 using RapidPcUse.Agent.Providers;
+using RapidPcUse.Knowledge;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -26,7 +27,15 @@ var tests = new (string Name, Func<Task> Run)[]
     ("provider faults retry inside the high-level loop", ProviderFaultRetries),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
+    ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
+    ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
     ("confirmation pauses and resumes without retaining a frame", ConfirmationPausesAndResumes),
+    ("outer assistance pauses and continues without carrying approval", HandoffPausesAndContinues),
+    ("outer assistance expires and requires a nonempty schema request", HandoffExpiryAndSchemaAreBounded),
+    ("outer assistance clears one-shot confirmation authority", HandoffClearsApprovedRisk),
+    ("remote content changes use their own authority boundary", RemoteContentChangeUsesDedicatedScope),
+    ("PC knowledge persists bounded versioned facts atomically", KnowledgeStorePersistsBoundedFacts),
+    ("PC knowledge rejects oversized updates without replacing the store", KnowledgeStoreRejectsOversizedUpdates),
     ("foreground process scope blocks out-of-scope input", ProcessScopeBlocksInput),
     ("repeated no-progress actions trigger recovery and continue", NoProgressRecovers),
     ("physical Escape cancels an in-flight provider call", TakeoverCancelsProvider),
@@ -459,6 +468,77 @@ static Task ScrollSchemasUseSharedLimits()
     return Task.CompletedTask;
 }
 
+static Task McpKnowledgeUpdateSchemaMatchesHandler()
+{
+    using var desktop = new FakeDesktop([]);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, null, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var update = response.RootElement.GetProperty("result").GetProperty("tools")
+        .EnumerateArray()
+        .Single(tool => tool.GetProperty("name").GetString() == "pc_knowledge_update");
+    var variants = update.GetProperty("inputSchema").GetProperty("oneOf").EnumerateArray().ToArray();
+    Assert(variants.Length == 2, "knowledge update schema did not publish two operation variants");
+    var upsert = variants.Single(variant =>
+        variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "upsert");
+    var upsertRequired = upsert.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToHashSet();
+    foreach (var property in new[] { "operation", "key", "kind", "subject", "fact", "source" })
+    {
+        Assert(upsertRequired.Contains(property), $"upsert schema omitted required handler field {property}");
+    }
+
+    var forget = variants.Single(variant =>
+        variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "forget");
+    var forgetRequired = forget.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray();
+    Assert(forgetRequired.SequenceEqual(new[] { "operation", "key" }), "forget schema requires fields its handler does not use");
+    return Task.CompletedTask;
+}
+
+static Task McpKnowledgeFailurePreservesPausedRun()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-corrupt-{Guid.NewGuid():N}");
+    var path = Path.Combine(directory, "knowledge.json");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(path, "not-json");
+        var state = new AgentWorkingState("Fixture visible", [], "Resolve route", [], []);
+        using var provider = new ReplayPcModelProvider(
+        [
+            new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+            new FinishDecision("Fixture completed.", state, "Fixture visible"),
+        ]);
+        using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+        using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+        var paused = loop.Run(Request(maxNoProgress: 3));
+        var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+        const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_knowledge_search\",\"arguments\":{\"query\":\"fixture\"}}}\n";
+        using var reader = new StringReader(input);
+        using var writer = new StringWriter();
+        var knowledgeTools = new PcKnowledgeTools(new PcKnowledgeStore(path));
+        new McpServer(desktop, loop, reader, writer, knowledgeTools).Run();
+        using var response = JsonDocument.Parse(writer.ToString().Trim());
+        var result = response.RootElement.GetProperty("result");
+        Assert(!result.GetProperty("isError").GetBoolean(), "knowledge failure became a terminal tool error");
+        Assert(result.GetProperty("structuredContent").GetProperty("desktop_state_unchanged").GetBoolean(),
+            "knowledge failure did not report the preserved desktop state");
+        Assert(desktop.StopCount == 1, "knowledge failure performed desktop failure cleanup");
+        var completed = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "No saved route was available; continue visually.");
+        Assert(completed.Status == PcAgentStatus.Completed, "knowledge failure destroyed the paused handoff session");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    return Task.CompletedTask;
+}
+
 static Task AgentLoopCorrectsRejectedAction()
 {
     using var invalid = JsonDocument.Parse("[{\"type\":\"scroll\",\"scroll_y\":10001}]");
@@ -547,6 +627,203 @@ static Task ConfirmationPausesAndResumes()
     Assert(completed.Status == PcAgentStatus.Completed, "approved run did not resume to completion");
     Assert(desktop.ActionBatches.Count == 1, "approved action did not execute exactly once");
     Assert(desktop.StopCount == 2, "resumed run did not release control");
+    return Task.CompletedTask;
+}
+
+static Task HandoffPausesAndContinues()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Resolve the app route", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+        new FinishDecision("Fixture route resolved.", state, "Fixture remains visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    Assert(paused.Status == PcAgentStatus.NeedsHandoff && paused.Handoff is not null, "run did not request outer assistance");
+    Assert(paused.Confirmation is null, "handoff was confused with confirmation");
+    Assert(desktop.StopCount == 1 && loop.RetainedImageCount == 0, "handoff retained desktop control or images");
+    var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff("wrong-session", handoff.HandoffId, "Verified route."));
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff(paused.SessionId, "wrong-handoff", "Verified route."));
+    var completed = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "The verified route is fixture://main.");
+    Assert(completed.Status == PcAgentStatus.Completed, "outer-assisted run did not continue");
+    Assert(desktop.StopCount == 2, "continued run did not release control");
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "Replay."));
+    return Task.CompletedTask;
+}
+
+static Task HandoffExpiryAndSchemaAreBounded()
+{
+    var clock = new AdjustableTimeProvider(new DateTimeOffset(2026, 8, 21, 12, 0, 0, TimeSpan.Zero));
+    var state = new AgentWorkingState("Fixture visible", [], "Resolve route", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), timeProvider: clock);
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    clock.Advance(SecurityLimits.AgentHandoffLifetime + TimeSpan.FromSeconds(1));
+    var expired = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "Verified route.");
+    Assert(expired.Status == PcAgentStatus.Blocked, "expired handoff resumed desktop control");
+    Assert(desktop.StopCount == 1, "expired handoff changed the stopped desktop state");
+
+    using var schemaProvider = new OpenAiResponsesProvider("test-key", Options(), new HttpClient(new NeverSendHandler()));
+    var payload = schemaProvider.BuildRequest(new PcModelTurnRequest(
+        "Resolve the fixture route.",
+        Scope(),
+        AgentWorkingState.Empty,
+        [],
+        Observation(2, [2]),
+        1,
+        10,
+        null));
+    using var request = JsonDocument.Parse(payload);
+    var handoffRequest = request.RootElement.GetProperty("tools")
+        .EnumerateArray()
+        .Single(tool => tool.GetProperty("name").GetString() == "computer_handoff")
+        .GetProperty("parameters")
+        .GetProperty("properties")
+        .GetProperty("handoff_request");
+    Assert(handoffRequest.GetProperty("minLength").GetInt32() == 1, "handoff tool schema allows an empty request");
+    return Task.CompletedTask;
+}
+
+static Task HandoffClearsApprovedRisk()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":0}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Resolve the verified route.", state),
+        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var confirmationPause = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = confirmationPause.Confirmation ?? throw new InvalidOperationException("confirmation is missing");
+    var handoffPause = loop.Resume(confirmationPause.SessionId, confirmation.ConfirmationId, approve: true);
+    var handoff = handoffPause.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    var secondConfirmation = loop.ResumeHandoff(handoffPause.SessionId, handoff.HandoffId, "Verified route.");
+    Assert(secondConfirmation.Status == PcAgentStatus.NeedsConfirmation,
+        "one-shot confirmation authority crossed the handoff boundary");
+    Assert(desktop.ActionBatches.Count == 0, "sensitive action executed with stale approval");
+    return Task.CompletedTask;
+}
+
+static Task RemoteContentChangeUsesDedicatedScope()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"key\",\"keys\":\"DELETE\"}]");
+    var decision = new ActDecision(
+        actions.RootElement.Clone(),
+        AgentWorkingState.Empty,
+        "Remote message is removed",
+        new HashSet<PcRiskFlag> { PcRiskFlag.RemoteContentChange });
+    var policy = new ActionPolicy(new FixedWindowInspector());
+    var denied = policy.Evaluate(decision, Scope(), approvedRisk: null);
+    Assert(denied.ConfirmationRisk == PcRiskFlag.RemoteContentChange, "remote mutation did not request its dedicated authority");
+    var remoteOnly = policy.Evaluate(
+        decision,
+        Scope() with { AllowRemoteContentChanges = true },
+        approvedRisk: null);
+    Assert(remoteOnly.ConfirmationRisk == PcRiskFlag.LocalDeletion,
+        "a model-declared remote risk suppressed the driver's DELETE inference");
+    var allowed = policy.Evaluate(
+        decision,
+        Scope() with { AllowRemoteContentChanges = true, AllowLocalDeletion = true },
+        approvedRisk: null);
+    Assert(allowed.Allowed && allowed.ConfirmationRisk is null, "fully scoped remote DELETE did not pass policy");
+    return Task.CompletedTask;
+}
+
+static Task KnowledgeStorePersistsBoundedFacts()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-{Guid.NewGuid():N}");
+    var path = Path.Combine(directory, "knowledge.json");
+    try
+    {
+        var store = new PcKnowledgeStore(path);
+        var first = store.Upsert(
+            "app.discord",
+            "app",
+            "Discord",
+            "The preferred server is reached from the first pinned server icon.",
+            "Launch Discord directly, then verify the server label before acting.",
+            "verified_observation",
+            90);
+        Assert(first.Revision == 1, "new knowledge did not start at revision one");
+        var loaded = new PcKnowledgeStore(path).Search("discord server", 4);
+        Assert(loaded.Count == 1 && loaded[0].Key == "app.discord", "persisted knowledge was not searchable");
+        var revised = store.Upsert(
+            "app.discord",
+            "app",
+            "Discord",
+            "The preferred server is reached from the first pinned server icon.",
+            "Launch Discord directly and confirm its label.",
+            "verified_observation",
+            95);
+        Assert(revised.Revision == 2, "knowledge revision did not advance");
+        Assert(store.Forget("app.discord") && store.Search("discord", 4).Count == 0, "forgotten knowledge remained searchable");
+    }
+    finally
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory);
+        }
+    }
+
+    return Task.CompletedTask;
+}
+
+static Task KnowledgeStoreRejectsOversizedUpdates()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-size-{Guid.NewGuid():N}");
+    var path = Path.Combine(directory, "knowledge.json");
+    try
+    {
+        var store = new PcKnowledgeStore(path);
+        var subject = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxSubjectCharacters / 2));
+        var fact = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxFactCharacters / 2));
+        var navigation = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxNavigationHintCharacters / 2));
+        var accepted = 0;
+        var rejected = false;
+        for (var index = 0; index < PcKnowledgeStore.MaxEntries; index++)
+        {
+            try
+            {
+                store.Upsert($"large.{index}", "workflow", subject, fact, navigation, "manual", 50);
+                accepted++;
+            }
+            catch (InvalidOperationException exception) when (exception.Message.Contains("size limit", StringComparison.Ordinal))
+            {
+                rejected = true;
+                break;
+            }
+        }
+
+        Assert(rejected, "high-Unicode entries did not reach the serialized byte limit");
+        Assert(new FileInfo(path).Length <= 512 * 1024, "an oversized knowledge file replaced the prior store");
+        var loaded = new PcKnowledgeStore(path).Search(string.Empty, PcKnowledgeStore.MaxSearchResults);
+        Assert(loaded.Count > 0 && accepted > 0, "the prior valid knowledge store became unreadable");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     return Task.CompletedTask;
 }
 
@@ -641,6 +918,7 @@ static PcAgentOptions Options() => new(
 static PcRunScope Scope() => new(
     new HashSet<string>(StringComparer.OrdinalIgnoreCase),
     AllowExternalCommunication: false,
+    AllowRemoteContentChanges: false,
     AllowLocalDeletion: false,
     AllowCredentials: true,
     AllowPurchases: false,
@@ -757,7 +1035,7 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
         DesktopController.ValidateActionPlan(actions, settleMilliseconds);
         ActionBatches.Add(actions.Clone());
         var timing = actions.EnumerateArray()
-            .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null))
+            .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null, null))
             .ToArray();
         var observation = _observations.Count == 0 ? null : _observations.Dequeue();
         if (_partialCompletedActions is int completedActions)
@@ -923,4 +1201,13 @@ internal sealed class ErrorHandler(HttpStatusCode statusCode, string responseBod
             Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
         });
     }
+}
+
+internal sealed class AdjustableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private DateTimeOffset _utcNow = utcNow;
+
+    public override DateTimeOffset GetUtcNow() => _utcNow;
+
+    internal void Advance(TimeSpan duration) => _utcNow += duration;
 }

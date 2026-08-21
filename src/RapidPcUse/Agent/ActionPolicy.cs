@@ -66,6 +66,7 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
     private static bool RequiresConfirmation(PcRiskFlag risk, PcRunScope scope) => risk switch
     {
         PcRiskFlag.ExternalCommunication => !scope.AllowExternalCommunication,
+        PcRiskFlag.RemoteContentChange => !scope.AllowRemoteContentChanges,
         PcRiskFlag.LocalDeletion => !scope.AllowLocalDeletion,
         PcRiskFlag.CredentialEntry => true,
         PcRiskFlag.PurchaseOrFinancial => true,
@@ -83,8 +84,9 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
         PcRiskFlag.DownloadOrInstall => 3,
         PcRiskFlag.UnclassifiedSensitiveAction => 4,
         PcRiskFlag.ExternalCommunication => 5,
-        PcRiskFlag.LocalDeletion => 6,
-        _ => 7,
+        PcRiskFlag.RemoteContentChange => 6,
+        PcRiskFlag.LocalDeletion => 7,
+        _ => 8,
     };
 
     private static void AddInferredRisks(JsonElement actions, HashSet<PcRiskFlag> risks)
@@ -107,6 +109,8 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
             if (chord.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                 .Any(key => key.Equals("DELETE", StringComparison.OrdinalIgnoreCase) || key.Equals("DEL", StringComparison.OrdinalIgnoreCase)))
             {
+                // Model-declared risk flags may add confirmation requirements,
+                // but can never suppress the driver's conservative inference.
                 risks.Add(PcRiskFlag.LocalDeletion);
             }
         }

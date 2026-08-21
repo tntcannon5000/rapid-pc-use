@@ -31,6 +31,7 @@ internal static class PcAgentDecisionParser
             "act" => ParseAct(root),
             "finish" => ParseFinish(root),
             "confirm" => ParseConfirm(root),
+            "handoff" => ParseHandoff(root),
             "blocked" => ParseBlocked(root),
             _ => throw new InvalidOperationException("The model returned an unknown structured decision."),
         };
@@ -60,6 +61,7 @@ internal static class PcAgentDecisionParser
             "computer_act" => ParseAct(root),
             "computer_finish" => ParseFinish(root),
             "computer_request_confirmation" => ParseConfirm(root),
+            "computer_handoff" => ParseHandoff(root),
             "computer_blocked" => ParseBlocked(root),
             _ => throw new InvalidOperationException("The model returned an unknown decision tool."),
         };
@@ -113,7 +115,7 @@ internal static class PcAgentDecisionParser
         var risks = new HashSet<PcRiskFlag>();
         if (root.TryGetProperty("risk_flags", out var riskFlags))
         {
-            if (riskFlags.ValueKind != JsonValueKind.Array || riskFlags.GetArrayLength() > 7)
+            if (riskFlags.ValueKind != JsonValueKind.Array || riskFlags.GetArrayLength() > 8)
             {
                 throw new InvalidOperationException("risk_flags must be a bounded array.");
             }
@@ -171,6 +173,26 @@ internal static class PcAgentDecisionParser
         return new ConfirmDecision(
             BoundedString(root, "operation_summary", SecurityLimits.MaxAgentConfirmationSummaryCharacters),
             risk,
+            ParseMemory(root));
+    }
+
+    private static HandoffDecision ParseHandoff(JsonElement root)
+    {
+        var reasonText = BoundedString(root, "handoff_reason", 64);
+        if (!TryParseHandoffReason(reasonText, out var reason))
+        {
+            throw new InvalidOperationException("The model requested an unknown handoff reason.");
+        }
+
+        var request = BoundedString(root, "handoff_request", SecurityLimits.MaxAgentHandoffRequestCharacters);
+        if (string.IsNullOrWhiteSpace(request))
+        {
+            throw new InvalidOperationException("A handoff request must state the bounded assistance needed.");
+        }
+
+        return new HandoffDecision(
+            reason,
+            request,
             ParseMemory(root));
     }
 
@@ -277,6 +299,7 @@ internal static class PcAgentDecisionParser
         risk = value switch
         {
             "external_communication" => PcRiskFlag.ExternalCommunication,
+            "remote_content_change" => PcRiskFlag.RemoteContentChange,
             "local_deletion" => PcRiskFlag.LocalDeletion,
             "credential_entry" => PcRiskFlag.CredentialEntry,
             "purchase_or_financial" => PcRiskFlag.PurchaseOrFinancial,
@@ -285,7 +308,7 @@ internal static class PcAgentDecisionParser
             "unclassified_sensitive_action" => PcRiskFlag.UnclassifiedSensitiveAction,
             _ => default,
         };
-        return value is "external_communication" or "local_deletion" or "credential_entry" or
+        return value is "external_communication" or "remote_content_change" or "local_deletion" or "credential_entry" or
             "purchase_or_financial" or "account_or_permission_change" or "download_or_install" or
             "unclassified_sensitive_action";
     }
@@ -293,6 +316,7 @@ internal static class PcAgentDecisionParser
     internal static string RiskName(PcRiskFlag risk) => risk switch
     {
         PcRiskFlag.ExternalCommunication => "external_communication",
+        PcRiskFlag.RemoteContentChange => "remote_content_change",
         PcRiskFlag.LocalDeletion => "local_deletion",
         PcRiskFlag.CredentialEntry => "credential_entry",
         PcRiskFlag.PurchaseOrFinancial => "purchase_or_financial",
@@ -300,5 +324,30 @@ internal static class PcAgentDecisionParser
         PcRiskFlag.DownloadOrInstall => "download_or_install",
         PcRiskFlag.UnclassifiedSensitiveAction => "unclassified_sensitive_action",
         _ => throw new ArgumentOutOfRangeException(nameof(risk)),
+    };
+
+    internal static bool TryParseHandoffReason(string? value, out PcHandoffReason reason)
+    {
+        reason = value switch
+        {
+            "need_knowledge" => PcHandoffReason.NeedKnowledge,
+            "need_terminal" => PcHandoffReason.NeedTerminal,
+            "need_filesystem" => PcHandoffReason.NeedFilesystem,
+            "semantic_ambiguity" => PcHandoffReason.SemanticAmbiguity,
+            "unsupported_capability" => PcHandoffReason.UnsupportedCapability,
+            _ => default,
+        };
+        return value is "need_knowledge" or "need_terminal" or "need_filesystem" or
+            "semantic_ambiguity" or "unsupported_capability";
+    }
+
+    internal static string HandoffReasonName(PcHandoffReason reason) => reason switch
+    {
+        PcHandoffReason.NeedKnowledge => "need_knowledge",
+        PcHandoffReason.NeedTerminal => "need_terminal",
+        PcHandoffReason.NeedFilesystem => "need_filesystem",
+        PcHandoffReason.SemanticAmbiguity => "semantic_ambiguity",
+        PcHandoffReason.UnsupportedCapability => "unsupported_capability",
+        _ => throw new ArgumentOutOfRangeException(nameof(reason)),
     };
 }

@@ -45,7 +45,7 @@ internal sealed class PcAgentLoop : IDisposable
         {
             if (_active || _paused is not null)
             {
-                throw new InvalidOperationException("A Rapid PC Use agent run is already active or awaiting confirmation.");
+                throw new InvalidOperationException("A Rapid PC Use agent run is already active or paused.");
             }
 
             _active = true;
@@ -82,6 +82,11 @@ internal sealed class PcAgentLoop : IDisposable
             }
 
             session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting confirmation.");
+            if (session.Handoff is not null)
+            {
+                throw new InvalidOperationException("The paused run is awaiting outer assistance, not confirmation.");
+            }
+
             var confirmation = session.Confirmation ?? throw new InvalidOperationException("The paused run has no confirmation request.");
             if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
                 !string.Equals(confirmation.ConfirmationId, confirmationId, StringComparison.Ordinal))
@@ -144,6 +149,78 @@ internal sealed class PcAgentLoop : IDisposable
         }
     }
 
+    internal PcRunResult ResumeHandoff(string sessionId, string handoffId, string outerContext)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (string.IsNullOrWhiteSpace(outerContext) ||
+            outerContext.Length > SecurityLimits.MaxAgentOuterContextCharacters ||
+            outerContext.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"outer_context must contain 1 to {SecurityLimits.MaxAgentOuterContextCharacters} printable characters.");
+        }
+
+        RunSession session;
+        lock (_gate)
+        {
+            if (_active)
+            {
+                throw new InvalidOperationException("The Rapid PC Use agent is already active.");
+            }
+
+            session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting outer assistance.");
+            if (session.Confirmation is not null)
+            {
+                throw new InvalidOperationException("The paused run is awaiting confirmation, not outer assistance.");
+            }
+
+            var handoff = session.Handoff ?? throw new InvalidOperationException("The paused run has no handoff request.");
+            if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(handoff.HandoffId, handoffId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The PC agent handoff token does not match the paused run.");
+            }
+
+            if (_timeProvider.GetUtcNow() > handoff.ExpiresUtc)
+            {
+                _paused = null;
+                session.Clear();
+                var expired = CreateResult(
+                    session,
+                    PcAgentStatus.Blocked,
+                    "The outer-assistance handoff expired and the PC task remained stopped.",
+                    null,
+                    null);
+                AgentTelemetry.RunCompleted(
+                    session.RunId,
+                    expired.Status,
+                    session.ModelTurns,
+                    session.ActionsExecuted,
+                    expired.ElapsedMilliseconds,
+                    0,
+                    0);
+                return expired;
+            }
+
+            _paused = null;
+            session.Handoff = null;
+            session.PendingOuterContext = outerContext;
+            _active = true;
+        }
+
+        try
+        {
+            return ContinueAsync(session).GetAwaiter().GetResult();
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _active = false;
+            }
+        }
+    }
+
     internal void CancelPaused()
     {
         RunSession? paused;
@@ -185,7 +262,7 @@ internal sealed class PcAgentLoop : IDisposable
                     return Complete(
                         session,
                         PcAgentStatus.Blocked,
-                        "The display layout changed while confirmation was pending, so the PC task remained stopped.",
+                        "The display layout changed while the PC task was paused, so the task remained stopped.",
                         segmentStarted,
                         null);
                 }
@@ -221,7 +298,8 @@ internal sealed class PcAgentLoop : IDisposable
                     session.ModelTurns + 1,
                     session.Request.Limits.MaxActions - session.ActionsExecuted,
                     session.ApprovedRisk,
-                    session.RunId);
+                    session.RunId,
+                    session.PendingOuterContext);
                 var remainingMilliseconds = Math.Max(
                     1,
                     session.Request.Limits.MaxDurationMilliseconds - checked((int)Math.Min(int.MaxValue, activeElapsed)));
@@ -267,6 +345,7 @@ internal sealed class PcAgentLoop : IDisposable
                 var providerCompleted = Stopwatch.GetTimestamp();
                 _desktop.ThrowIfControlLost();
                 session.ModelTurns++;
+                session.PendingOuterContext = "";
                 AgentTelemetry.ProviderCompleted(session.RunId, session.ModelTurns, modelResult);
                 var frameId = current.FrameId;
                 observation = null;
@@ -309,6 +388,11 @@ internal sealed class PcAgentLoop : IDisposable
 
                         RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_requested");
                         return Pause(session, confirmation.Risk, confirmation.OperationSummary, current.TopologyKey, segmentStarted);
+
+                    case HandoffDecision handoff:
+                        session.State = handoff.NextState;
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "outer_handoff_requested");
+                        return PauseForHandoff(session, handoff, current.TopologyKey, segmentStarted);
 
                     case ActDecision act:
                         session.State = act.NextState;
@@ -532,6 +616,48 @@ internal sealed class PcAgentLoop : IDisposable
         return result;
     }
 
+    private PcRunResult PauseForHandoff(
+        RunSession session,
+        HandoffDecision decision,
+        string topologyKey,
+        long segmentStarted)
+    {
+        _desktop.ThrowIfControlLost();
+        session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
+        session.Handoff = new PcHandoff(
+            DriverLog.NewOperationId("handoff"),
+            decision.Reason,
+            decision.Request,
+            _timeProvider.GetUtcNow() + SecurityLimits.AgentHandoffLifetime);
+        // A one-shot confirmation is bound to the exact pending action. Never
+        // carry it across an outer-planner boundary where the plan may change.
+        session.ApprovedRisk = null;
+        session.ExpectedTopologyKey = topologyKey;
+        _visualMemory.Clear();
+        _desktop.Stop();
+        lock (_gate)
+        {
+            _paused = session;
+        }
+
+        var result = CreateResult(
+            session,
+            PcAgentStatus.NeedsHandoff,
+            "The PC task is waiting for bounded assistance from the outer Codex planner.",
+            null,
+            null,
+            session.Handoff);
+        AgentTelemetry.RunCompleted(
+            session.RunId,
+            result.Status,
+            session.ModelTurns,
+            session.ActionsExecuted,
+            result.ElapsedMilliseconds,
+            0,
+            StateBytes(session.State));
+        return result;
+    }
+
     private PcRunResult Complete(
         RunSession session,
         PcAgentStatus status,
@@ -561,7 +687,8 @@ internal sealed class PcAgentLoop : IDisposable
         PcAgentStatus status,
         string summary,
         PcConfirmation? confirmation,
-        Observation? finalObservation)
+        Observation? finalObservation,
+        PcHandoff? handoff = null)
         => new(
             status,
             session.RunId,
@@ -571,6 +698,7 @@ internal sealed class PcAgentLoop : IDisposable
             session.ActiveElapsedMilliseconds,
             session.TelemetrySessionId,
             confirmation,
+            handoff,
             finalObservation);
 
     private void ValidateRequest(PcRunRequest request)
@@ -659,6 +787,7 @@ internal sealed class PcAgentLoop : IDisposable
     private static string ConfirmationSummary(PcRiskFlag risk) => risk switch
     {
         PcRiskFlag.ExternalCommunication => "Allow the PC agent to send or submit information externally?",
+        PcRiskFlag.RemoteContentChange => "Allow the PC agent to modify or delete remote content or social state?",
         PcRiskFlag.LocalDeletion => "Allow the PC agent to delete a local item?",
         PcRiskFlag.CredentialEntry => "Allow the PC agent to enter credentials?",
         PcRiskFlag.PurchaseOrFinancial => "Allow the PC agent to perform a purchase or financial action?",
@@ -714,6 +843,8 @@ internal sealed class PcAgentLoop : IDisposable
         internal long ActiveElapsedMilliseconds { get; set; }
         internal PcRiskFlag? ApprovedRisk { get; set; }
         internal PcConfirmation? Confirmation { get; set; }
+        internal PcHandoff? Handoff { get; set; }
+        internal string PendingOuterContext { get; set; } = "";
         internal string? ExpectedTopologyKey { get; set; }
 
         internal void AddOutcome(AgentActionOutcome outcome)
@@ -731,6 +862,8 @@ internal sealed class PcAgentLoop : IDisposable
             RecentOutcomes.Clear();
             ApprovedRisk = null;
             Confirmation = null;
+            Handoff = null;
+            PendingOuterContext = "";
             ExpectedTopologyKey = null;
         }
     }

@@ -6,6 +6,7 @@ internal enum PcAgentStatus
 {
     Completed,
     NeedsConfirmation,
+    NeedsHandoff,
     Blocked,
     LimitReached,
     Failed,
@@ -18,12 +19,23 @@ internal enum PcAgentDecisionKind
     Act,
     Finish,
     Confirm,
+    Handoff,
     Blocked,
+}
+
+internal enum PcHandoffReason
+{
+    NeedKnowledge,
+    NeedTerminal,
+    NeedFilesystem,
+    SemanticAmbiguity,
+    UnsupportedCapability,
 }
 
 internal enum PcRiskFlag
 {
     ExternalCommunication,
+    RemoteContentChange,
     LocalDeletion,
     CredentialEntry,
     PurchaseOrFinancial,
@@ -35,6 +47,7 @@ internal enum PcRiskFlag
 internal sealed record PcRunScope(
     IReadOnlySet<string> AllowedProcesses,
     bool AllowExternalCommunication,
+    bool AllowRemoteContentChanges,
     bool AllowLocalDeletion,
     bool AllowCredentials,
     bool AllowPurchases,
@@ -91,6 +104,12 @@ internal sealed record ConfirmDecision(
     AgentWorkingState NextState)
     : PcAgentDecision(PcAgentDecisionKind.Confirm, NextState);
 
+internal sealed record HandoffDecision(
+    PcHandoffReason Reason,
+    string Request,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.Handoff, NextState);
+
 internal sealed record BlockedDecision(
     string Summary,
     string Reason,
@@ -106,7 +125,8 @@ internal sealed record PcModelTurnRequest(
     int Turn,
     int RemainingActions,
     PcRiskFlag? ApprovedRisk,
-    string RunId = "");
+    string RunId = "",
+    string OuterContext = "");
 
 internal sealed record ProviderTurnTimings(
     long RequestBuildMicroseconds,
@@ -145,6 +165,12 @@ internal sealed record PcConfirmation(
     PcRiskFlag Risk,
     DateTimeOffset ExpiresUtc);
 
+internal sealed record PcHandoff(
+    string HandoffId,
+    PcHandoffReason Reason,
+    string Request,
+    DateTimeOffset ExpiresUtc);
+
 internal sealed record PcRunResult(
     PcAgentStatus Status,
     string SessionId,
@@ -154,6 +180,7 @@ internal sealed record PcRunResult(
     long ElapsedMilliseconds,
     string TelemetrySessionId,
     PcConfirmation? Confirmation,
+    PcHandoff? Handoff,
     Observation? FinalObservation);
 
 internal interface IPcDesktop

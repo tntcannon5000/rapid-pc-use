@@ -1,6 +1,7 @@
 /.tools/
 /artifacts/
 /benchmark-results/
+/benchmark-config/local.json
 /dist/
 /plugin/rapid-pc-use/bin/
 /src/**/bin/
