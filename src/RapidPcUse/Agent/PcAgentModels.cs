@@ -17,6 +17,8 @@ internal enum PcAgentStatus
 internal enum PcAgentDecisionKind
 {
     Act,
+    Retrieve,
+    RunbookStep,
     Finish,
     Confirm,
     Handoff,
@@ -34,6 +36,7 @@ internal enum PcHandoffReason
 
 internal enum PcRiskFlag
 {
+    LocalProcessLaunch,
     ExternalCommunication,
     RemoteContentChange,
     LocalDeletion,
@@ -51,7 +54,8 @@ internal sealed record PcRunScope(
     bool AllowLocalDeletion,
     bool AllowCredentials,
     bool AllowPurchases,
-    bool AllowAccountOrPermissionChanges);
+    bool AllowAccountOrPermissionChanges,
+    bool AllowLocalProcessLaunches = false);
 
 internal sealed record PcRunLimits(
     int MaxModelTurns,
@@ -63,7 +67,9 @@ internal sealed record PcRunRequest(
     string Task,
     PcRunScope Scope,
     PcRunLimits Limits,
-    bool ReturnFinalScreenshot);
+    bool ReturnFinalScreenshot,
+    string ExecutionContext = "",
+    string LaunchUri = "");
 
 internal sealed record AgentWorkingState(
     string ScreenSummary,
@@ -91,6 +97,18 @@ internal sealed record ActDecision(
     string CompletionGuardText = "",
     string CompletionSummary = "")
     : PcAgentDecision(PcAgentDecisionKind.Act, NextState);
+
+internal sealed record RetrieveDecision(
+    string Query,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.Retrieve, NextState);
+
+internal sealed record RunbookStepDecision(
+    string RunbookKey,
+    string StepId,
+    string ExpectedChange,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.RunbookStep, NextState);
 
 internal sealed record FinishDecision(
     string Summary,
@@ -126,7 +144,8 @@ internal sealed record PcModelTurnRequest(
     int RemainingActions,
     PcRiskFlag? ApprovedRisk,
     string RunId = "",
-    string OuterContext = "");
+    string OuterContext = "",
+    string RetrievedContext = "");
 
 internal sealed record ProviderTurnTimings(
     long RequestBuildMicroseconds,
@@ -205,6 +224,20 @@ internal interface IPcModelProvider : IDisposable
     string Model { get; }
 
     Task<PcModelTurnResult> DecideAsync(PcModelTurnRequest request, CancellationToken cancellationToken);
+}
+
+internal sealed record PcLaunchTiming(
+    long DispatchMicroseconds,
+    long ReadinessWaitMicroseconds,
+    long TotalMicroseconds,
+    string Scheme,
+    bool TargetFound,
+    bool TargetActivated,
+    string ForegroundProcess);
+
+internal interface IPcLaunchCoordinator
+{
+    PcLaunchTiming Launch(string launchUri, Action checkOperation);
 }
 
 internal interface IWarmablePcModelProvider

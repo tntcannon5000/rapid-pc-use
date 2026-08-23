@@ -26,6 +26,8 @@ The outer model should own intent, authority, knowledge, and durable learning. T
 
 Pass-one implementation now includes the 80 ms native pacing invariant, dependency-frontier prompt, distinct `pc_continue` handoff, dedicated remote-content-change authority, a bounded atomic knowledge store, skill retrieval/update guidance, and the three real-world benchmark adapters requested below.
 
+The local pass-two working tree adds a strictly allowlisted direct-launch coordinator and a one-turn trusted execution brief. The current route-learning stage adds driver-local semantic retrieval over facts and structured runbooks plus exact stored local launches, fixed direct-process commands, and fixed loopback app-interface calls selected by opaque IDs. Retrieval, dispatch, readiness, and capture are measured separately. The inner model cannot supply executable paths, commands, URLs, bodies, arguments, environment, or stdin; cannot execute a runbook step snapshot it did not retrieve during the current run; and cannot write durable knowledge.
+
 ## 1. Action pacing and batching
 
 ### Current behavior
@@ -256,7 +258,7 @@ Compact attributable facts:
 - Whether an application remains in the tray after closing.
 - Known direct URLs and URI handlers.
 
-Pass-one knowledge v1 stores a source, confidence, creation/update timestamps, and revision. Machine/profile scope, expiry and stale-route suppression, sensitivity classification, and performance statistics are explicit pass-two design goals; they are not present in the v1 schema yet.
+Knowledge v1 stores a source, confidence, creation/update timestamps, and revision. Runbooks v1 separately store semantic search terms, concise ordered guidance, exact trusted launch, fixed direct-process, or loopback app-interface steps, source/confidence metadata, timestamps, and revision. The driver automatically records only per-step attempt disposition and timing after terminal completion, never task text or output, and uses those measurements to rank equally relevant routes by reliability and successful latency. Machine/profile scope, expiry and stale-route suppression, sensitivity classification, and higher-order route optimization remain future design goals.
 
 ### Entities and relationships
 
@@ -273,7 +275,7 @@ Credentials should never be stored in this database. Store references to Windows
 
 ### Procedural runbooks
 
-Runbooks should be versioned and human-readable:
+Runbooks are versioned and human-readable. The first implementation supports guidance; exact `.exe`, `.cmd`, `.bat`, and `.lnk` visible launch steps; fixed direct `.exe` commands with bounded stored arguments, runtime, and output; and fixed `127.0.0.1`/`localhost` HTTP operations for a known local application. The inner model never writes the target or arguments. GET and effect-free commands are read-only. Effectful commands and POSTs must declare an independently enforced authority, and an ambiguous response or exit is never retried; a separate read-only step must verify state. Only an exact loopback GET may be marked `required_before_finish`, in which case the driver rejects premature model completion until that exact verifier succeeds. Fixed commands remain explicit model-selected steps so process-launch authority cannot be bypassed by automatic finish verification:
 
 ```text
 restart-discord-bot
@@ -286,7 +288,7 @@ restart-discord-bot
 
 ### Performance memory
 
-For each verified route, store:
+For each route step, the implemented privacy-safe learner stores attempt, success, failure, uncertain-effect, total successful time, last time, and timestamp. It updates only after the desktop run reaches a terminal result, preserves compatible metrics across semantic revisions, and treats persistence failure as a non-terminal optimization failure. For future higher-order planning, also derive:
 
 - Success count.
 - Median and p95 completion time.
@@ -295,7 +297,7 @@ For each verified route, store:
 - Common failure states.
 - Whether terminal, URI, keyboard, or visual navigation was fastest.
 
-This lets the planner learn that direct Chrome launch is faster than navigating Start, or that SSH is more reliable than Parsec for restarting the bot.
+The current tie-breaker already learns which equally relevant trusted route is more reliable and faster. The richer layer will let the planner compare unlike route shapes, such as direct Chrome launch versus Start navigation or SSH versus Parsec, without injecting raw task or screen content into durable memory.
 
 ### Durable-write boundary
 
@@ -310,7 +312,7 @@ The safe learning path is:
 5. A curator writes a versioned update.
 6. Failed runs lower confidence or add a known failure; they do not silently overwrite a working route.
 
-The full knowledgebase should never be injected into the inner model. The outer planner should retrieve only the relevant facts and distil them into a short execution brief.
+The full knowledgebase is never injected into the inner model. The driver automatically prefetches the original task; outer Codex can also add a one-turn execution brief. When a later named entity or sub-workflow is discovered, the inner model can issue one bounded semantic query inside the driver. It receives at most a small text projection containing facts, runbook guidance, and opaque executable step IDs; targets and payloads are omitted. Any selected operation must match the exact immutable `(runbook key, step ID, stored step)` snapshot projected during that run; a mutable store re-read cannot change the validated dispatch. Launches still pass explicit process-launch scope or one-shot confirmation; local mutations separately pass their declared effect boundary. Effectful app steps consume action budget and one-shot authority before dispatch and are at most once even when the response is lost. A target marked as requiring elevation hands off before Windows secure desktop rather than waiting on UAC. Required finish verifiers are armed only for an explicitly selected route or the single strongest exact multiword task match. They remain driver state, not model discretion, and a later consequential native or runbook mutation re-arms them so completion always depends on a fresh exact read.
 
 ## 7. Recommended implementation order
 
@@ -321,6 +323,7 @@ The full knowledgebase should never be injected into the inner model. The outer 
 5. Build the three scenario adapters and bounded verifiers.
 6. Benchmark Luna, Terra, and Sol on realistic scenarios.
 7. Tune Terra using captured failure traces.
-8. Build knowledgebase v1: facts, entities, runbooks, and route statistics.
-9. Add safe direct-launch and terminal execution paths.
-10. Select the default model using verified task-completion time and reliability.
+8. Build knowledgebase v1 facts and structured runbooks. **Implemented locally.**
+9. Add safe direct-launch and exact trusted local runbook execution. **Implemented locally for URI launch, exact process launch, fixed direct `.exe` commands with stored arguments and bounded output, and fixed loopback app interfaces; arbitrary model-authored shell remains intentionally unsupported.**
+10. Add route performance memory, expiry/staleness policy, and independent verification-backed learning. **Per-step disposition/timing learning and same-relevance route ranking are implemented locally; semantic route promotion remains outer-curated, while expiry and richer cross-route planning remain.**
+11. Select the default model using verified task-completion time and reliability.

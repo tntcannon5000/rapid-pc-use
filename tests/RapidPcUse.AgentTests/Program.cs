@@ -1,11 +1,47 @@
 using System.Net;
 using System.Net.Http;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using RapidPcUse;
 using RapidPcUse.Agent;
 using RapidPcUse.Agent.Providers;
 using RapidPcUse.Knowledge;
+
+if (args is ["--process-isolation-probe"])
+{
+    var stdin = Console.In.ReadToEnd();
+    Console.WriteLine($"secret={Environment.GetEnvironmentVariable("RAPID_PC_USE_PROCESS_SECRET") ?? "<null>"};stdin={stdin.Length}");
+    return 0;
+}
+
+if (args is ["--output-flood-probe"])
+{
+    Console.Out.Write(new string('o', 32_768));
+    Console.Error.Write(new string('e', 32_768));
+    return 0;
+}
+
+if (args is ["--hold-lock-probe", var lockPath])
+{
+    using var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    Thread.Sleep(TimeSpan.FromMinutes(5));
+    return 0;
+}
+
+if (args is ["--spawn-child-probe", var dotnetHost, var pidPath, var lockPathForChild])
+{
+    Thread.Sleep(200);
+    using var child = Process.Start(new ProcessStartInfo(dotnetHost)
+    {
+        UseShellExecute = false,
+        ArgumentList = { typeof(RunbookFeatureTests).Assembly.Location, "--hold-lock-probe", lockPathForChild },
+    }) ?? throw new InvalidOperationException("Could not start containment child fixture.");
+    File.WriteAllText(pidPath, child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    Thread.Sleep(TimeSpan.FromMinutes(5));
+    return 0;
+}
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -21,6 +57,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
+    ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
+    ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
     ("agent loop corrects a rejected action without releasing control", AgentLoopCorrectsRejectedAction),
     ("stale frames refresh without terminating low-level control", StaleFrameRefreshes),
@@ -34,8 +72,31 @@ var tests = new (string Name, Func<Task> Run)[]
     ("outer assistance expires and requires a nonempty schema request", HandoffExpiryAndSchemaAreBounded),
     ("outer assistance clears one-shot confirmation authority", HandoffClearsApprovedRisk),
     ("remote content changes use their own authority boundary", RemoteContentChangeUsesDedicatedScope),
-    ("PC knowledge persists bounded versioned facts atomically", KnowledgeStorePersistsBoundedFacts),
-    ("PC knowledge rejects oversized updates without replacing the store", KnowledgeStoreRejectsOversizedUpdates),
+    ("PC knowledge persists bounded versioned facts atomically", RunbookFeatureTests.KnowledgeStorePersistsBoundedFacts),
+    ("PC knowledge rejects oversized updates without replacing the store", RunbookFeatureTests.KnowledgeStoreRejectsOversizedUpdates),
+    ("driver-local retrieval and runbook launch stay inside the fast loop", RunbookFeatureTests.LocalRouteStaysInsideFastLoop),
+    ("runbook steps require retrieval in the current run", RunbookFeatureTests.UnretrievedRunbookIsRejected),
+    ("runbook execution is bound to the exact retrieved step snapshot", RunbookFeatureTests.InventedRunbookStepIsRejected),
+    ("local runbook launch has an explicit one-shot authority boundary", RunbookFeatureTests.RunbookLaunchRequiresAuthority),
+    ("trusted local app steps enforce their declared effect authority", RunbookFeatureTests.RunbookEffectRequiresAuthority),
+    ("effectful process steps accumulate exact one-shot authority", RunbookFeatureTests.EffectfulProcessAccumulatesExactAuthority),
+    ("effectful runbook attempts consume budget and cannot be repeated", RunbookFeatureTests.EffectfulRunbookAttemptIsAtMostOnce),
+    ("irrelevant fuzzy runbooks do not arm finish verifiers", RunbookFeatureTests.IrrelevantRunbookDoesNotGateFinish),
+    ("required read-only runbook verification blocks premature finish", RunbookFeatureTests.RequiredRunbookVerificationBlocksFinish),
+    ("required runbook verification also gates local completion guards", RunbookFeatureTests.RequiredRunbookVerificationGatesCompletionGuard),
+    ("native mutations invalidate prior runbook verification", RunbookFeatureTests.NativeMutationRearmsRunbookVerifier),
+    ("elevated runbook targets hand off before secure desktop", RunbookFeatureTests.ElevatedRunbookHandsOffBeforeDispatch),
+    ("PC runbooks persist trusted structured routes without leaking paths inward", RunbookFeatureTests.RunbookStorePersistsStructuredRoutes),
+    ("trusted command runbooks execute fixed arguments with bounded output", RunbookFeatureTests.TrustedProcessRunbookExecutesFixedArguments),
+    ("trusted commands close stdin and remove inherited secrets", RunbookFeatureTests.TrustedProcessIsolatesInputAndEnvironment),
+    ("trusted command timeout contains descendants and output floods", RunbookFeatureTests.TrustedProcessContainsLifetimeAndOutput),
+    ("verified runbook performance persists and ranks equivalent routes", RunbookFeatureTests.RunbookPerformanceLearnsRoutePreference),
+    ("terminal profiling includes route-learning persistence", RunbookFeatureTests.RouteLearningIsIncludedInElapsedTime),
+    ("runbook result context remains bounded end to end", RunbookFeatureTests.RunbookResultContextIsBounded),
+    ("malformed local memory cannot terminate an automatic PC run", RunbookFeatureTests.CorruptMemoryDoesNotTerminateRun),
+    ("runbook app interfaces are loopback-only and effect-attributed", RunbookFeatureTests.RunbookLocalInterfacesAreLoopbackAndAttributed),
+    ("MCP runbook schema matches the structured route handler", RunbookFeatureTests.McpRunbookSchemaMatchesHandler),
+    ("web fast start never selects a competing foreground browser", RunbookFeatureTests.FastStartRejectsCompetingBrowser),
     ("foreground process scope blocks out-of-scope input", ProcessScopeBlocksInput),
     ("repeated no-progress actions trigger recovery and continue", NoProgressRecovers),
     ("physical Escape cancels an in-flight provider call", TakeoverCancelsProvider),
@@ -373,6 +434,56 @@ static Task McpRunNormalizesOversizedBudgets()
     Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
         "oversized optional budgets should be normalized instead of terminating pc_run");
     Assert(desktop.StopCount == 1, "normalized run should release control normally");
+    return Task.CompletedTask;
+}
+
+static Task McpRunUsesTrustedFastStart()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Finish", [], []);
+    using var provider = new RecordingProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Fixture settles", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Fixture completed.", state, "Fixture visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
+    var launcher = new FakeLaunchCoordinator();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"execution_context\":\"Trusted fixture route.\",\"launch_uri\":\"https://example.com/fixture\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    Assert(response.RootElement.GetProperty("result").GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
+        "fast-start MCP run did not complete");
+    Assert(launcher.LaunchUris.SequenceEqual(["https://example.com/fixture"]), "trusted launch did not execute exactly once");
+    Assert(desktop.ActiveWindowObserveCount == 2, "fast start did not capture both pre-launch and post-launch state");
+    Assert(desktop.ActionBatches.Count == 1, "fast-start action did not capture its normal post-action state");
+    Assert(provider.Requests.Count == 2, "fast-start fixture used the wrong number of model turns");
+    Assert(provider.Requests[0].Observation.FrameId == 2, "the first model turn saw the pre-launch frame");
+    Assert(provider.Requests[0].OuterContext == "Trusted fixture route.", "the first model turn missed execution context");
+    Assert(string.IsNullOrEmpty(provider.Requests[1].OuterContext), "execution context leaked beyond the first model turn");
+    return Task.CompletedTask;
+}
+
+static Task FastStartActivationFailureBlocksBeforeModel()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Finish", [], []);
+    using var provider = new RecordingProvider(
+    [
+        new FinishDecision("This decision must never be requested.", state, "Fixture visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1])]);
+    var launcher = new FakeLaunchCoordinator(targetActivated: false, foregroundProcess: "protected-app");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    var result = loop.Run(Request(maxNoProgress: 3) with { LaunchUri = "https://example.com/fixture" });
+
+    Assert(result.Status == PcAgentStatus.Blocked, "failed direct activation did not block safely");
+    Assert(result.Summary.Contains("protected foreground process", StringComparison.Ordinal),
+        "activation blocker was not explained");
+    Assert(provider.Requests.Count == 0, "a model turn received the unrelated foreground frame");
+    Assert(desktop.ActiveWindowObserveCount == 1, "activation failure captured an unrelated post-launch frame");
+    Assert(desktop.StopCount == 1, "activation failure did not release desktop control");
     return Task.CompletedTask;
 }
 
@@ -740,93 +851,6 @@ static Task RemoteContentChangeUsesDedicatedScope()
     return Task.CompletedTask;
 }
 
-static Task KnowledgeStorePersistsBoundedFacts()
-{
-    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-{Guid.NewGuid():N}");
-    var path = Path.Combine(directory, "knowledge.json");
-    try
-    {
-        var store = new PcKnowledgeStore(path);
-        var first = store.Upsert(
-            "app.discord",
-            "app",
-            "Discord",
-            "The preferred server is reached from the first pinned server icon.",
-            "Launch Discord directly, then verify the server label before acting.",
-            "verified_observation",
-            90);
-        Assert(first.Revision == 1, "new knowledge did not start at revision one");
-        var loaded = new PcKnowledgeStore(path).Search("discord server", 4);
-        Assert(loaded.Count == 1 && loaded[0].Key == "app.discord", "persisted knowledge was not searchable");
-        var revised = store.Upsert(
-            "app.discord",
-            "app",
-            "Discord",
-            "The preferred server is reached from the first pinned server icon.",
-            "Launch Discord directly and confirm its label.",
-            "verified_observation",
-            95);
-        Assert(revised.Revision == 2, "knowledge revision did not advance");
-        Assert(store.Forget("app.discord") && store.Search("discord", 4).Count == 0, "forgotten knowledge remained searchable");
-    }
-    finally
-    {
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory);
-        }
-    }
-
-    return Task.CompletedTask;
-}
-
-static Task KnowledgeStoreRejectsOversizedUpdates()
-{
-    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-size-{Guid.NewGuid():N}");
-    var path = Path.Combine(directory, "knowledge.json");
-    try
-    {
-        var store = new PcKnowledgeStore(path);
-        var subject = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxSubjectCharacters / 2));
-        var fact = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxFactCharacters / 2));
-        var navigation = string.Concat(Enumerable.Repeat("😀", PcKnowledgeStore.MaxNavigationHintCharacters / 2));
-        var accepted = 0;
-        var rejected = false;
-        for (var index = 0; index < PcKnowledgeStore.MaxEntries; index++)
-        {
-            try
-            {
-                store.Upsert($"large.{index}", "workflow", subject, fact, navigation, "manual", 50);
-                accepted++;
-            }
-            catch (InvalidOperationException exception) when (exception.Message.Contains("size limit", StringComparison.Ordinal))
-            {
-                rejected = true;
-                break;
-            }
-        }
-
-        Assert(rejected, "high-Unicode entries did not reach the serialized byte limit");
-        Assert(new FileInfo(path).Length <= 512 * 1024, "an oversized knowledge file replaced the prior store");
-        var loaded = new PcKnowledgeStore(path).Search(string.Empty, PcKnowledgeStore.MaxSearchResults);
-        Assert(loaded.Count > 0 && accepted > 0, "the prior valid knowledge store became unreadable");
-    }
-    finally
-    {
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory, recursive: true);
-        }
-    }
-
-    return Task.CompletedTask;
-}
-
 static Task ProcessScopeBlocksInput()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
@@ -1116,6 +1140,49 @@ internal sealed class FlakyProvider(int failures) : IPcModelProvider
 
     public void Dispose()
     {
+    }
+}
+
+internal sealed class RecordingProvider(IEnumerable<PcAgentDecision> decisions) : IPcModelProvider
+{
+    private readonly Queue<PcAgentDecision> _decisions = new(decisions);
+
+    internal List<PcModelTurnRequest> Requests { get; } = [];
+    public string Name => "recording";
+    public string Model => "fixture";
+
+    public Task<PcModelTurnResult> DecideAsync(PcModelTurnRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Requests.Add(request);
+        var decision = _decisions.Dequeue();
+        return Task.FromResult(new PcModelTurnResult(
+            decision,
+            Name,
+            Model,
+            0,
+            request.Observation.Frames.Count,
+            request.Observation.Frames.Sum(frame => frame.Bytes.Length),
+            0,
+            new ProviderLocalStageTimings(0, 0, 0, 0),
+            new ProviderTurnTimings(0, 0, 0, 0, 0),
+            new ProviderUsage(0, 0, 0, 0)));
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class FakeLaunchCoordinator(bool targetActivated = true, string foregroundProcess = "test") : IPcLaunchCoordinator
+{
+    internal List<string> LaunchUris { get; } = [];
+
+    public PcLaunchTiming Launch(string launchUri, Action checkOperation)
+    {
+        checkOperation();
+        LaunchUris.Add(launchUri);
+        return new PcLaunchTiming(100, 200, 300, "https", true, targetActivated, foregroundProcess);
     }
 }
 

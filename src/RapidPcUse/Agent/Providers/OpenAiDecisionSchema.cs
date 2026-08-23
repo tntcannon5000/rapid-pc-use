@@ -14,7 +14,7 @@ internal static class OpenAiDecisionSchema
         writer.WriteStartObject();
         writer.WritePropertyName("decision");
         writer.WriteStartObject();
-        StringEnum(writer, "act", "finish", "confirm", "handoff", "blocked");
+        StringEnum(writer, "act", "retrieve", "runbook_step", "finish", "confirm", "handoff", "blocked");
         writer.WriteEndObject();
         writer.WritePropertyName("actions");
         writer.WriteStartObject();
@@ -42,6 +42,7 @@ internal static class OpenAiDecisionSchema
         StringEnum(
             writer,
             "none",
+            "local_process_launch",
             "external_communication",
             "remote_content_change",
             "local_deletion",
@@ -64,6 +65,9 @@ internal static class OpenAiDecisionSchema
             "unsupported_capability");
         writer.WriteEndObject();
         WriteStringProperty(writer, "handoff_request", SecurityLimits.MaxAgentHandoffRequestCharacters);
+        WriteStringProperty(writer, "query", SecurityLimits.MaxAgentRetrievalQueryCharacters);
+        WriteStringProperty(writer, "runbook_key", SecurityLimits.MaxAgentRunbookKeyCharacters);
+        WriteStringProperty(writer, "step_id", SecurityLimits.MaxAgentRunbookStepIdCharacters);
         writer.WriteEndObject();
         WriteRequired(
             writer,
@@ -80,7 +84,10 @@ internal static class OpenAiDecisionSchema
             "risk",
             "reason",
             "handoff_reason",
-            "handoff_request");
+            "handoff_request",
+            "query",
+            "runbook_key",
+            "step_id");
         writer.WriteBoolean("additionalProperties", false);
         writer.WriteEndObject();
     }
@@ -89,6 +96,8 @@ internal static class OpenAiDecisionSchema
     {
         writer.WriteStartArray();
         WriteFunction(writer, "computer_act", "Execute one short deterministic native Windows action batch, then inspect a fresh screenshot.", WriteActParameters);
+        WriteFunction(writer, "computer_retrieve", "Search trusted local PC facts and runbooks inside this fast loop, then inspect the same screenshot with the bounded results.", WriteRetrieveParameters);
+        WriteFunction(writer, "computer_runbook_step", "Execute one exact trusted launch, fixed direct-process command, or loopback app step returned by computer_retrieve. Provide only its opaque runbook key and step ID, never a target, command, argument, URL, or payload.", WriteRunbookStepParameters);
         WriteFunction(writer, "computer_finish", "Finish only after the current screenshot visibly confirms the requested result.", WriteFinishParameters);
         WriteFunction(writer, "computer_request_confirmation", "Pause and return to the outer Codex model for explicit user confirmation before a sensitive effect.", WriteConfirmParameters);
         WriteFunction(writer, "computer_handoff", "Pause and ask the outer Codex planner for knowledge, terminal, filesystem, or another capability that visible desktop control cannot provide.", WriteHandoffParameters);
@@ -156,11 +165,41 @@ internal static class OpenAiDecisionSchema
         writer.WriteString("type", "object");
         writer.WritePropertyName("properties");
         writer.WriteStartObject();
-        WriteStringProperty(writer, "summary", SecurityLimits.MaxAgentSummaryCharacters);
+        WriteStringProperty(writer, "summary", SecurityLimits.MaxAgentSummaryCharacters, minimumLength: 1);
         WriteStringProperty(writer, "memory", SecurityLimits.MaxAgentStateFieldCharacters);
-        WriteStringProperty(writer, "visible_evidence", SecurityLimits.MaxAgentStateFieldCharacters);
+        WriteStringProperty(writer, "visible_evidence", SecurityLimits.MaxAgentStateFieldCharacters, minimumLength: 1);
         writer.WriteEndObject();
         WriteRequired(writer, "summary", "memory", "visible_evidence");
+        writer.WriteBoolean("additionalProperties", false);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteRetrieveParameters(Utf8JsonWriter writer)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("type", "object");
+        writer.WritePropertyName("properties");
+        writer.WriteStartObject();
+        WriteStringProperty(writer, "query", SecurityLimits.MaxAgentRetrievalQueryCharacters, minimumLength: 1);
+        WriteStringProperty(writer, "memory", SecurityLimits.MaxAgentStateFieldCharacters);
+        writer.WriteEndObject();
+        WriteRequired(writer, "query", "memory");
+        writer.WriteBoolean("additionalProperties", false);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteRunbookStepParameters(Utf8JsonWriter writer)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("type", "object");
+        writer.WritePropertyName("properties");
+        writer.WriteStartObject();
+        WriteStringProperty(writer, "runbook_key", SecurityLimits.MaxAgentRunbookKeyCharacters, minimumLength: 1);
+        WriteStringProperty(writer, "step_id", SecurityLimits.MaxAgentRunbookStepIdCharacters, minimumLength: 1);
+        WriteStringProperty(writer, "expected_change", SecurityLimits.MaxAgentStateFieldCharacters);
+        WriteStringProperty(writer, "memory", SecurityLimits.MaxAgentStateFieldCharacters);
+        writer.WriteEndObject();
+        WriteRequired(writer, "runbook_key", "step_id", "expected_change", "memory");
         writer.WriteBoolean("additionalProperties", false);
         writer.WriteEndObject();
     }
@@ -187,8 +226,8 @@ internal static class OpenAiDecisionSchema
         writer.WriteString("type", "object");
         writer.WritePropertyName("properties");
         writer.WriteStartObject();
-        WriteStringProperty(writer, "summary", SecurityLimits.MaxAgentSummaryCharacters);
-        WriteStringProperty(writer, "reason", SecurityLimits.MaxAgentStateFieldCharacters);
+        WriteStringProperty(writer, "summary", SecurityLimits.MaxAgentSummaryCharacters, minimumLength: 1);
+        WriteStringProperty(writer, "reason", SecurityLimits.MaxAgentStateFieldCharacters, minimumLength: 1);
         WriteStringProperty(writer, "memory", SecurityLimits.MaxAgentStateFieldCharacters);
         writer.WriteEndObject();
         WriteRequired(writer, "summary", "reason", "memory");
@@ -319,6 +358,7 @@ internal static class OpenAiDecisionSchema
         writer.WriteStartObject();
         StringEnum(
             writer,
+            "local_process_launch",
             "external_communication",
             "remote_content_change",
             "local_deletion",

@@ -90,6 +90,7 @@ function New-RapidPcRealWorldScenario {
                 AllowRemoteContentChanges = $true
                 AllowLegacyLocalDeletion = $true
                 MutatesAccountState = $true
+                ExecutionContext = 'Trusted fast route: direct Discord application launch was requested. Use the visible app search to reach the exact contact named in the task; do not spend a model turn navigating Start.'
                 Task = @"
 Starting with Discord fully closed, use the visible Discord application to message the test account "$($Config.discord.contact)" with exactly "$temporaryMessage". Verify that the message was sent, delete that exact temporary message, and verify it is gone. Then navigate to the "$($Config.discord.server)" Discord server and visibly verify that server before fully quitting Discord. Do not merely close its window: Discord must be fully exited. Do not leave any temporary benchmark message behind. Finish with the exact summary marker: DISCORD_DM_COMPLETE $Nonce
 "@.Trim()
@@ -106,6 +107,7 @@ Starting with Discord fully closed, use the visible Discord application to messa
                 AllowRemoteContentChanges = $true
                 AllowLegacyLocalDeletion = $false
                 MutatesAccountState = $true
+                ExecutionContext = 'Trusted fast route: the browser was launched directly to YouTube. Start from the visible target page and prefer search/address and keyboard controls over Windows app navigation.'
                 Task = @"
 Starting with Chrome closed, open YouTube and search for "$($Config.youtube.query)". Open the intended video and play it. Inspect and remember its current Like state and playlist membership. Make the video liked if needed, then inspect the playlist chooser carefully enough to determine which playlists currently contain it. Restore the video's original Like state and exact original playlist membership before closing Chrome normally. Do not finish with a visible Chrome window. Finish with the exact summary marker: YOUTUBE_STATE_RESTORED $Nonce
 "@.Trim()
@@ -122,6 +124,7 @@ Starting with Chrome closed, open YouTube and search for "$($Config.youtube.quer
                 AllowRemoteContentChanges = $false
                 AllowLegacyLocalDeletion = $false
                 MutatesAccountState = $false
+                ExecutionContext = 'Trusted fast route: the browser was launched directly to Amazon Orders. Remain read-only; count item quantities on or after the task date and inspect additional order pages only when needed.'
                 Task = @"
 Starting with Chrome closed, open Amazon and use the signed-in Orders interface to count how many individual items were ordered on or after $($Config.amazon.sinceDate). Count item quantities, not merely order cards. Do not buy, cancel, return, review, or otherwise change anything. Also determine how many of those items are visibly marked returned if the interface makes that available. Close Chrome normally when finished. Use this exact summary format with numeric values: AMAZON_COUNT_COMPLETE $Nonce items=<number> returned=<number>
 "@.Trim()

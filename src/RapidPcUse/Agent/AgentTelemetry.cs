@@ -1,5 +1,7 @@
 namespace RapidPcUse.Agent;
 
+using RapidPcUse.Knowledge;
+
 internal static class AgentTelemetry
 {
     internal static void RunStarted(string runId, IPcModelProvider provider, PcRunRequest request)
@@ -16,6 +18,153 @@ internal static class AgentTelemetry
                 max_actions = request.Limits.MaxActions,
                 max_duration_ms = request.Limits.MaxDurationMilliseconds,
                 no_progress_limit = request.Limits.MaxConsecutiveNoProgressTurns,
+                execution_context_characters = request.ExecutionContext.Length,
+                direct_launch_requested = !string.IsNullOrWhiteSpace(request.LaunchUri),
+                allow_local_process_launches = request.Scope.AllowLocalProcessLaunches,
+            });
+
+    internal static void KnowledgeRetrieved(string runId, int turn, PcRouteRetrievalResult result)
+        => DriverLog.Info(
+            "agent.knowledge_retrieved",
+            "The inner PC loop retrieved bounded trusted local route context.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                turn,
+                knowledge_count = result.KnowledgeCount,
+                runbook_count = result.RunbookCount,
+                context_characters = result.Context.Length,
+                elapsed_us = result.ElapsedMicroseconds,
+                privacy = "Query, keys, paths, and retrieved contents omitted.",
+            });
+
+    internal static void KnowledgeRetrievalUnavailable(string runId, int turn, Exception exception)
+        => DriverLog.Warning(
+            "agent.knowledge_retrieval_unavailable",
+            "The inner PC loop could not read trusted local route context and continued without destroying the desktop run.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new { turn },
+            exception: exception);
+
+    internal static void RouteLearningUnavailable(string runId, Exception exception)
+        => DriverLog.Warning(
+            "agent.route_learning_unavailable",
+            "The completed run could not persist privacy-safe route performance; the task result was preserved.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new { privacy = "Runbook keys, step IDs, targets, arguments, and contents omitted." },
+            exception: exception);
+
+    internal static void RouteLearningCompleted(string runId, int sampleCount, long elapsedMicroseconds)
+        => DriverLog.Info(
+            "agent.route_learning_completed",
+            "The terminal path finished privacy-safe route-performance persistence.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                sample_count = sampleCount,
+                elapsed_us = elapsedMicroseconds,
+                privacy = "Runbook keys, step IDs, targets, arguments, and contents omitted.",
+            });
+
+    internal static void RunbookStepExecuted(
+        string runId,
+        int turn,
+        PcRunbookExecutionResult result,
+        Observation observation)
+        => DriverLog.Info(
+            "agent.runbook_step_executed",
+            "The inner PC loop executed one exact trusted local runbook step.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                turn,
+                step_kind = result.StepKind,
+                dispatch_us = result.DispatchMicroseconds,
+                readiness_us = result.ReadinessMicroseconds,
+                total_us = result.TotalMicroseconds,
+                target_observed = result.TargetObserved,
+                reused_existing_target = result.ReusedExistingTarget,
+                foreground_process = result.ForegroundProcess,
+                capture_total_us = CaptureWallMicroseconds(observation),
+                privacy = "Runbook key, step ID, description, target, request body, and result data omitted.",
+            });
+
+    internal static void RunbookStepUnavailable(string runId, int turn, Exception exception)
+        => DriverLog.Warning(
+            "agent.runbook_step_unavailable",
+            "The trusted runbook step was unavailable; no retry was attempted.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new { turn, privacy = "Runbook key, step ID, path, URL, body, and result omitted." },
+            exception: exception);
+
+    internal static void RunbookStepAttemptFailed(
+        string runId,
+        int turn,
+        string stepKind,
+        bool effectful,
+        long totalMicroseconds,
+        Exception exception)
+        => DriverLog.Warning(
+            "agent.runbook_step_attempt_failed",
+            effectful
+                ? "A trusted effectful runbook attempt failed or returned ambiguously after consuming its action budget; it remains non-repeatable."
+                : "A trusted read-only runbook attempt failed after consuming its action budget.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                turn,
+                step_kind = stepKind,
+                effectful,
+                total_us = totalMicroseconds,
+                action_budget_consumed = true,
+                privacy = "Runbook key, step ID, path, URL, body, and result omitted.",
+            },
+            exception: exception);
+
+    internal static void RunbookStepEffectUncertain(
+        string runId,
+        int turn,
+        PcRunbookExecutionResult result,
+        Observation observation)
+        => DriverLog.Warning(
+            "agent.runbook_step_effect_uncertain",
+            "A trusted effectful runbook request was dispatched but its result could not be verified; action budget and one-shot authority were consumed and the step remains non-repeatable.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                turn,
+                step_kind = result.StepKind,
+                dispatch_us = result.DispatchMicroseconds,
+                total_us = result.TotalMicroseconds,
+                action_budget_consumed = true,
+                target_observed = false,
+                capture_total_us = CaptureWallMicroseconds(observation),
+                privacy = "Runbook key, step ID, target, request body, and result data omitted.",
+            });
+
+    internal static void LaunchCompleted(string runId, PcLaunchTiming timing)
+        => DriverLog.Info(
+            "agent.launch_completed",
+            "Rapid PC Use completed a trusted direct launch and bounded foreground-readiness wait.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                scheme = timing.Scheme,
+                dispatch_us = timing.DispatchMicroseconds,
+                readiness_wait_us = timing.ReadinessWaitMicroseconds,
+                total_us = timing.TotalMicroseconds,
+                target_found = timing.TargetFound,
+                target_activated = timing.TargetActivated,
+                foreground_process = timing.ForegroundProcess,
             });
 
     internal static void ProviderCompleted(string runId, int turn, PcModelTurnResult result)

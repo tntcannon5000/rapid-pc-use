@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add driver-local semantic retrieval, structured trusted runbooks, exact local process launches, fixed direct-process commands with stored arguments and bounded output, fixed loopback app-interface steps with declared effect authority, driver-enforced read-only finish verifiers, and route profiling inside the fast PC loop.
+- Learn privacy-safe per-step reliability and latency after terminal runs and use it to rank equally relevant trusted routes without persisting task text, output, paths, or arguments.
+- Bind learned performance to an execution fingerprint, bound terminal learning lock waits, and isolate fixed commands with closed stdin, a minimal non-secret environment, and kill-on-close descendant containment.
 - Add native 80 ms pointer pacing, dependency-frontier action batching, and pacing telemetry.
 - Add resumable, authority-preserving outer assistance through `pc_continue`, with explicit untrusted-handoff boundaries.
 - Add dedicated remote-content-change policy without weakening independently inferred local-deletion risk.

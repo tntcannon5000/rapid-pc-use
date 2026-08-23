@@ -124,6 +124,22 @@ foreach ($configuration in $schedule) {
             -Summary $run.Summary
 
         $profile = $run.Profile
+        $launchTargetFound = Get-RapidPcProfileValue $profile 'LaunchTargetFound'
+        $launchTargetActivated = Get-RapidPcProfileValue $profile 'LaunchTargetActivated'
+        $launchForegroundProcess = Get-RapidPcProfileValue $profile 'LaunchForegroundProcess'
+        $failureCategory = if ([bool]$run.SupportsDirectLaunch -and
+            $null -ne $launchTargetActivated -and
+            -not [bool]$launchTargetActivated -and
+            [int]$run.ModelTurns -eq 0) {
+            'launch_activation_blocked'
+        }
+        else {
+            $verification.FailureCategory
+        }
+        # Score the agent-authored end state before deterministic harness cleanup. This prevents
+        # the last ordinary failed cell from leaving an application visible without allowing the
+        # cleanup to turn an application-close failure into a passing result.
+        Reset-RapidPcRealWorldScenario -Scenario $scenario
         $rows.Add([pscustomobject]@{
             RunNumber = $runNumber
             Repetition = [int]$configuration.Repetition
@@ -137,7 +153,7 @@ foreach ($configuration in $schedule) {
             ProvisionalSuccess = [bool]$verification.ProvisionalSuccess
             VerificationLevel = [string]$verification.VerificationLevel
             StateIsolationVerified = [bool]$verification.StateIsolationVerified
-            FailureCategory = $verification.FailureCategory
+            FailureCategory = $failureCategory
             CompletionMarkerSeen = [bool]$verification.CompletionMarkerSeen
             StartStateRestored = [bool]$verification.ApplicationClosed
             ObservedItemCount = $verification.ObservedItemCount
@@ -156,6 +172,12 @@ foreach ($configuration in $schedule) {
             TotalActionExecutionMs = Get-RapidPcProfileValue $profile 'TotalActionExecutionMs'
             TotalPointerPacingMs = Get-RapidPcProfileValue $profile 'TotalPointerPacingMs'
             TotalCaptureMs = Get-RapidPcProfileValue $profile 'TotalCaptureMs'
+            InitialLaunchMs = Get-RapidPcProfileValue $profile 'InitialLaunchMs'
+            LaunchDispatchMs = Get-RapidPcProfileValue $profile 'LaunchDispatchMs'
+            LaunchReadinessWaitMs = Get-RapidPcProfileValue $profile 'LaunchReadinessWaitMs'
+            LaunchTargetFound = $launchTargetFound
+            LaunchTargetActivated = $launchTargetActivated
+            LaunchForegroundProcess = $launchForegroundProcess
             TotalSettleMs = Get-RapidPcProfileValue $profile 'TotalSettleMs'
             TotalRequestBuildMs = Get-RapidPcProfileValue $profile 'TotalRequestBuildMs'
             TotalDecisionParseMs = Get-RapidPcProfileValue $profile 'TotalDecisionParseMs'
@@ -164,6 +186,8 @@ foreach ($configuration in $schedule) {
             HandoffCount = $run.HandoffCount
             HandoffReasons = @($run.HandoffReasons)
             RemoteContentScopeSupported = [bool]$run.SupportsRemoteContentScope
+            DirectLaunchSupported = [bool]$run.SupportsDirectLaunch
+            ExecutionContextSupported = [bool]$run.SupportsExecutionContext
         })
         if (-not $verification.StateIsolationVerified) {
             $scheduleAborted = $true
@@ -208,6 +232,12 @@ foreach ($configuration in $schedule) {
             TotalActionExecutionMs = $null
             TotalPointerPacingMs = $null
             TotalCaptureMs = $null
+            InitialLaunchMs = $null
+            LaunchDispatchMs = $null
+            LaunchReadinessWaitMs = $null
+            LaunchTargetFound = $null
+            LaunchTargetActivated = $null
+            LaunchForegroundProcess = $null
             TotalSettleMs = $null
             TotalRequestBuildMs = $null
             TotalDecisionParseMs = $null
@@ -216,6 +246,8 @@ foreach ($configuration in $schedule) {
             HandoffCount = $null
             HandoffReasons = @()
             RemoteContentScopeSupported = $false
+            DirectLaunchSupported = $false
+            ExecutionContextSupported = $false
         })
         Write-Warning "Run $runNumber failed before a valid result was produced ($($_.Exception.GetType().Name))."
         if ($scenario.MutatesAccountState) {

@@ -19,6 +19,7 @@ var tests = new (string Name, Action Run)[]
     ("diagnostics redact exception-controlled data", DiagnosticsAreRedacted),
     ("zero-interval text builds bounded native input batches", TextInputBatchesAreBounded),
     ("pointer clicks enforce the minimum inter-click interval", PointerClicksArePaced),
+    ("direct launch URIs are narrowly allowlisted", DirectLaunchUrisAreAllowlisted),
     ("bounded parser fuzz is deterministic", BoundedParserFuzz),
 };
 
@@ -141,6 +142,26 @@ static void PointerClicksArePaced()
     timestamp += InputTimingPolicy.MinimumInterClickMilliseconds;
     pacer.BeforeClick(() => checks++);
     Assert(waitedMilliseconds.Count == 1, "an already-paced click received an unnecessary delay");
+}
+
+static void DirectLaunchUrisAreAllowlisted()
+{
+    Assert(PcLaunchCoordinator.ValidateUri("https://example.com/path").Scheme == "https", "HTTPS launch was rejected");
+    Assert(PcLaunchCoordinator.ValidateUri("http://localhost:8080/").Scheme == "http", "HTTP launch was rejected");
+    Assert(PcLaunchCoordinator.ValidateUri("discord:").Scheme == "discord", "exact Discord launch was rejected");
+    foreach (var rejected in new[]
+             {
+                 "relative/path",
+                 "file:///C:/Windows/System32/cmd.exe",
+                 "ftp://example.com/file",
+                 "custom:payload",
+                 "discord://-/channels/1/2",
+                 "https://user:secret@example.com/",
+                 "https://example.com/\nnext",
+             })
+    {
+        Expect<ArgumentException>(() => PcLaunchCoordinator.ValidateUri(rejected));
+    }
 }
 
 static void ActionValidationReportsCorrectionData()

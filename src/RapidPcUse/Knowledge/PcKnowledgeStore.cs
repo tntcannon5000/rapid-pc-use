@@ -172,12 +172,19 @@ internal sealed class PcKnowledgeStore
         using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read);
         var document = JsonSerializer.Deserialize<PcKnowledgeDocument>(stream, JsonOptions)
             ?? throw new InvalidOperationException("The PC knowledge store is empty or invalid.");
-        if (document.Version != CurrentVersion || document.Entries.Count > MaxEntries)
+        if (document.Entries is null ||
+            document.Version != CurrentVersion ||
+            document.Entries.Count > MaxEntries)
         {
             throw new InvalidOperationException("The PC knowledge store version or entry count is invalid.");
         }
 
         var entries = document.Entries.ToList();
+        if (entries.Any(entry => entry is null))
+        {
+            throw new InvalidOperationException("The PC knowledge store contains a null entry.");
+        }
+
         if (entries.Select(entry => entry.Key).Distinct(StringComparer.Ordinal).Count() != entries.Count)
         {
             throw new InvalidOperationException("The PC knowledge store contains duplicate keys.");
@@ -272,6 +279,11 @@ internal sealed class PcKnowledgeStore
 
     private static void ValidateStoredEntry(PcKnowledgeEntry entry)
     {
+        if (entry is null)
+        {
+            throw new InvalidOperationException("The PC knowledge store contains a null entry.");
+        }
+
         _ = ValidKey(entry.Key);
         _ = AllowedValue(entry.Kind, nameof(entry.Kind), AllowedKinds);
         _ = Bounded(entry.Subject, nameof(entry.Subject), MaxSubjectCharacters, allowEmpty: false);
@@ -329,6 +341,11 @@ internal sealed class PcKnowledgeStore
 
     private static string Bounded(string value, string name, int maximum, bool allowEmpty)
     {
+        if (value is null)
+        {
+            throw new ArgumentException($"{name} is missing.");
+        }
+
         value = value.Trim();
         if ((!allowEmpty && value.Length == 0) || value.Length > maximum || value.Any(char.IsControl))
         {

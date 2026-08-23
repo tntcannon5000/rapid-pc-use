@@ -40,6 +40,11 @@ internal static class SecurityLimits
     internal const int MaxAgentConfirmationSummaryCharacters = 600;
     internal const int MaxAgentHandoffRequestCharacters = 600;
     internal const int MaxAgentOuterContextCharacters = 1_200;
+    internal const int MaxAgentRetrievalQueryCharacters = 240;
+    internal const int MaxAgentRetrievedContextCharacters = 2_400;
+    internal const int MaxAgentRunbookKeyCharacters = 96;
+    internal const int MaxAgentRunbookStepIdCharacters = 64;
+    internal const int MaxAgentLaunchUriCharacters = 2_048;
     internal static readonly TimeSpan MaxFrameAge = TimeSpan.FromSeconds(30);
     internal static readonly TimeSpan AgentConfirmationLifetime = TimeSpan.FromMinutes(5);
     internal static readonly TimeSpan AgentHandoffLifetime = TimeSpan.FromMinutes(5);

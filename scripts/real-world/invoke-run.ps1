@@ -64,25 +64,36 @@ function Invoke-RapidPcRealWorldRun {
         if ($null -eq $pcRun) {
             throw 'The selected executable does not advertise pc_run.'
         }
-        $scopeProperties = $pcRun.inputSchema.properties.scope.properties
+        $runProperties = $pcRun.inputSchema.properties
+        $scopeProperties = $runProperties.scope.properties
         $supportsRemoteContentScope = $null -ne $scopeProperties.PSObject.Properties['allow_remote_content_changes']
+        $supportsDirectLaunch = $null -ne $runProperties.PSObject.Properties['launch_uri']
+        $supportsExecutionContext = $null -ne $runProperties.PSObject.Properties['execution_context']
 
         $scope = New-RapidPcBenchmarkScope -Scenario $Scenario -SupportsRemoteContentScope $supportsRemoteContentScope
+
+        $runArguments = @{
+            task = [string]$Scenario.Task
+            scope = $scope
+            limits = @{
+                max_model_turns = 50
+                max_actions = 256
+                max_duration_ms = $MaxDurationMs
+                max_consecutive_no_progress_turns = 8
+            }
+            return_final_screenshot = $false
+        }
+        if ($supportsDirectLaunch -and -not [string]::IsNullOrWhiteSpace([string]$Scenario.LaunchUri)) {
+            $runArguments.launch_uri = [string]$Scenario.LaunchUri
+        }
+        if ($supportsExecutionContext -and -not [string]::IsNullOrWhiteSpace([string]$Scenario.ExecutionContext)) {
+            $runArguments.execution_context = [string]$Scenario.ExecutionContext
+        }
 
         $outerWall.Restart()
         Send-RapidPcMcpRequest -Writer $process.StandardInput -Id 3 -Method 'tools/call' -Params @{
             name = 'pc_run'
-            arguments = @{
-                task = [string]$Scenario.Task
-                scope = $scope
-                limits = @{
-                    max_model_turns = 50
-                    max_actions = 256
-                    max_duration_ms = $MaxDurationMs
-                    max_consecutive_no_progress_turns = 8
-                }
-                return_final_screenshot = $false
-            }
+            arguments = $runArguments
         }
         $response = Read-RapidPcMcpResponse -Reader $process.StandardOutput -Operation 'pc_run' -TimeoutMilliseconds ($MaxDurationMs + 15000)
         if ($null -ne $response.PSObject.Properties['error']) {
@@ -174,6 +185,8 @@ function Invoke-RapidPcRealWorldRun {
         AgentElapsedMs = [long]$responseResult.elapsedMs
         OuterWallMs = [Math]::Round($outerWall.Elapsed.TotalMilliseconds, 3)
         SupportsRemoteContentScope = $supportsRemoteContentScope
+        SupportsDirectLaunch = $supportsDirectLaunch
+        SupportsExecutionContext = $supportsExecutionContext
         HandoffCount = $handoffReasons.Count
         HandoffReasons = @($handoffReasons)
         Profile = $profile.AgentRun

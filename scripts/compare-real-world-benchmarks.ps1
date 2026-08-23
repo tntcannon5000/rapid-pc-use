@@ -166,6 +166,7 @@ foreach ($beforeRow in @($before.Rows)) {
         BeforeActions = $beforeRow.ActionsExecuted
         AfterActions = $afterRow.ActionsExecuted
         AfterPointerPacingMs = if ($null -ne $afterRow.PSObject.Properties['TotalPointerPacingMs']) { $afterRow.TotalPointerPacingMs } else { $null }
+        AfterInitialLaunchMs = if ($null -ne $afterRow.PSObject.Properties['InitialLaunchMs']) { $afterRow.InitialLaunchMs } else { $null }
     })
 }
 

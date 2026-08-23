@@ -65,6 +65,7 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
 
     private static bool RequiresConfirmation(PcRiskFlag risk, PcRunScope scope) => risk switch
     {
+        PcRiskFlag.LocalProcessLaunch => !scope.AllowLocalProcessLaunches,
         PcRiskFlag.ExternalCommunication => !scope.AllowExternalCommunication,
         PcRiskFlag.RemoteContentChange => !scope.AllowRemoteContentChanges,
         PcRiskFlag.LocalDeletion => !scope.AllowLocalDeletion,
@@ -83,10 +84,11 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
         PcRiskFlag.AccountOrPermissionChange => 2,
         PcRiskFlag.DownloadOrInstall => 3,
         PcRiskFlag.UnclassifiedSensitiveAction => 4,
-        PcRiskFlag.ExternalCommunication => 5,
-        PcRiskFlag.RemoteContentChange => 6,
-        PcRiskFlag.LocalDeletion => 7,
-        _ => 8,
+        PcRiskFlag.LocalProcessLaunch => 5,
+        PcRiskFlag.ExternalCommunication => 6,
+        PcRiskFlag.RemoteContentChange => 7,
+        PcRiskFlag.LocalDeletion => 8,
+        _ => 9,
     };
 
     private static void AddInferredRisks(JsonElement actions, HashSet<PcRiskFlag> risks)

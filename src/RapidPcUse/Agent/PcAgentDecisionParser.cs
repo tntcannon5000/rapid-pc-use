@@ -29,6 +29,8 @@ internal static class PcAgentDecisionParser
         return kind.GetString() switch
         {
             "act" => ParseAct(root),
+            "retrieve" => ParseRetrieve(root),
+            "runbook_step" => ParseRunbookStep(root),
             "finish" => ParseFinish(root),
             "confirm" => ParseConfirm(root),
             "handoff" => ParseHandoff(root),
@@ -59,6 +61,8 @@ internal static class PcAgentDecisionParser
         return functionName switch
         {
             "computer_act" => ParseAct(root),
+            "computer_retrieve" => ParseRetrieve(root),
+            "computer_runbook_step" => ParseRunbookStep(root),
             "computer_finish" => ParseFinish(root),
             "computer_request_confirmation" => ParseConfirm(root),
             "computer_handoff" => ParseHandoff(root),
@@ -156,10 +160,44 @@ internal static class PcAgentDecisionParser
 
     private static FinishDecision ParseFinish(JsonElement root)
     {
+        var summary = BoundedString(root, "summary", SecurityLimits.MaxAgentSummaryCharacters);
+        var evidence = BoundedString(root, "visible_evidence", SecurityLimits.MaxAgentStateFieldCharacters);
+        if (string.IsNullOrWhiteSpace(summary) || string.IsNullOrWhiteSpace(evidence))
+        {
+            throw new InvalidOperationException("computer_finish requires a non-empty summary and visible evidence.");
+        }
+
         return new FinishDecision(
-            BoundedString(root, "summary", SecurityLimits.MaxAgentSummaryCharacters),
+            summary,
             ParseMemory(root),
-            BoundedString(root, "visible_evidence", SecurityLimits.MaxAgentStateFieldCharacters));
+            evidence);
+    }
+
+    private static RetrieveDecision ParseRetrieve(JsonElement root)
+    {
+        var query = BoundedString(root, "query", SecurityLimits.MaxAgentRetrievalQueryCharacters);
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new InvalidOperationException("computer_retrieve requires a non-empty local knowledge query.");
+        }
+
+        return new RetrieveDecision(query, ParseMemory(root));
+    }
+
+    private static RunbookStepDecision ParseRunbookStep(JsonElement root)
+    {
+        var key = BoundedString(root, "runbook_key", SecurityLimits.MaxAgentRunbookKeyCharacters);
+        var stepId = BoundedString(root, "step_id", SecurityLimits.MaxAgentRunbookStepIdCharacters);
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(stepId))
+        {
+            throw new InvalidOperationException("computer_runbook_step requires a runbook key and step ID from retrieval.");
+        }
+
+        return new RunbookStepDecision(
+            key,
+            stepId,
+            BoundedString(root, "expected_change", SecurityLimits.MaxAgentStateFieldCharacters),
+            ParseMemory(root));
     }
 
     private static ConfirmDecision ParseConfirm(JsonElement root)
@@ -197,10 +235,16 @@ internal static class PcAgentDecisionParser
     }
 
     private static BlockedDecision ParseBlocked(JsonElement root)
-        => new(
-            BoundedString(root, "summary", SecurityLimits.MaxAgentSummaryCharacters),
-            BoundedString(root, "reason", SecurityLimits.MaxAgentStateFieldCharacters),
-            ParseMemory(root));
+    {
+        var summary = BoundedString(root, "summary", SecurityLimits.MaxAgentSummaryCharacters);
+        var reason = BoundedString(root, "reason", SecurityLimits.MaxAgentStateFieldCharacters);
+        if (string.IsNullOrWhiteSpace(summary) || string.IsNullOrWhiteSpace(reason))
+        {
+            throw new InvalidOperationException("computer_blocked requires a non-empty summary and reason.");
+        }
+
+        return new BlockedDecision(summary, reason, ParseMemory(root));
+    }
 
     private static AgentWorkingState ParseMemory(JsonElement root)
         => new(
@@ -298,6 +342,7 @@ internal static class PcAgentDecisionParser
     {
         risk = value switch
         {
+            "local_process_launch" => PcRiskFlag.LocalProcessLaunch,
             "external_communication" => PcRiskFlag.ExternalCommunication,
             "remote_content_change" => PcRiskFlag.RemoteContentChange,
             "local_deletion" => PcRiskFlag.LocalDeletion,
@@ -308,13 +353,14 @@ internal static class PcAgentDecisionParser
             "unclassified_sensitive_action" => PcRiskFlag.UnclassifiedSensitiveAction,
             _ => default,
         };
-        return value is "external_communication" or "remote_content_change" or "local_deletion" or "credential_entry" or
+        return value is "local_process_launch" or "external_communication" or "remote_content_change" or "local_deletion" or "credential_entry" or
             "purchase_or_financial" or "account_or_permission_change" or "download_or_install" or
             "unclassified_sensitive_action";
     }
 
     internal static string RiskName(PcRiskFlag risk) => risk switch
     {
+        PcRiskFlag.LocalProcessLaunch => "local_process_launch",
         PcRiskFlag.ExternalCommunication => "external_communication",
         PcRiskFlag.RemoteContentChange => "remote_content_change",
         PcRiskFlag.LocalDeletion => "local_deletion",
