@@ -647,7 +647,7 @@ internal static class RunbookFeatureTests
         try
         {
             Environment.SetEnvironmentVariable("RAPID_PC_USE_PROCESS_SECRET", "must-not-cross-boundary");
-            var executable = PinnedDotnetHost();
+            var executable = TestDotnetHost();
             var testAssembly = typeof(RunbookFeatureTests).Assembly.Location;
             var store = new PcRunbookStore(Path.Combine(directory, "runbooks-v1.json"));
             var runbook = store.Upsert(
@@ -692,7 +692,7 @@ internal static class RunbookFeatureTests
         Directory.CreateDirectory(directory);
         try
         {
-            var executable = PinnedDotnetHost();
+            var executable = TestDotnetHost();
             var testAssembly = typeof(RunbookFeatureTests).Assembly.Location;
             var store = new PcRunbookStore(Path.Combine(directory, "runbooks-v1.json"));
             var flood = store.Upsert(
@@ -1065,8 +1065,14 @@ internal static class RunbookFeatureTests
     }
 
 
-    private static string PinnedDotnetHost()
+    private static string TestDotnetHost()
     {
+        var configuredHost = Environment.GetEnvironmentVariable("RAPID_PC_TEST_DOTNET_HOST");
+        if (!string.IsNullOrWhiteSpace(configuredHost) && File.Exists(configuredHost))
+        {
+            return Path.GetFullPath(configuredHost);
+        }
+
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
             var root = Path.Combine(directory.FullName, ".tools", "dotnet");
@@ -1084,7 +1090,7 @@ internal static class RunbookFeatureTests
             }
         }
 
-        throw new InvalidOperationException("The repository-pinned .NET host is unavailable.");
+        throw new InvalidOperationException("The verification-selected .NET host is unavailable.");
     }
 
     private static PcAgentOptions Options() => new(

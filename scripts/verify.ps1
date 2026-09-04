@@ -63,9 +63,16 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Security regression tests failed.'
 }
 
-& $dotnet run --project $agentTestsProject -c Release --no-build
-if ($LASTEXITCODE -ne 0) {
-    throw 'PC agent regression tests failed.'
+$previousTestDotnetHost = $env:RAPID_PC_TEST_DOTNET_HOST
+try {
+    $env:RAPID_PC_TEST_DOTNET_HOST = $dotnet
+    & $dotnet run --project $agentTestsProject -c Release --no-build
+    if ($LASTEXITCODE -ne 0) {
+        throw 'PC agent regression tests failed.'
+    }
+}
+finally {
+    $env:RAPID_PC_TEST_DOTNET_HOST = $previousTestDotnetHost
 }
 
 & $benchmarkTests
