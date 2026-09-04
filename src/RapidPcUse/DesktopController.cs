@@ -78,10 +78,11 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         foreach (var action in actions.EnumerateArray())
         {
             var actionTimestamp = Stopwatch.GetTimestamp();
+            var pointerPacingMilliseconds = 0;
             try
             {
                 checkOperation();
-                ExecuteAction(action, actionSurfaces, checkOperation);
+                pointerPacingMilliseconds = ExecuteAction(action, actionSurfaces, checkOperation);
                 checkOperation();
             }
             catch (UserTakeoverException)
@@ -109,7 +110,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                 break;
             }
 
-            actionTimings.Add(CreateActionTiming(actionIndex, action, actionTimestamp));
+            actionTimings.Add(CreateActionTiming(actionIndex, action, actionTimestamp, pointerPacingMilliseconds));
             _session.Touch();
             actionIndex++;
         }
@@ -186,6 +187,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
 
         RequireRange(settleMilliseconds, 0, SecurityLimits.MaxWaitMilliseconds, "settle_ms");
         long estimatedMilliseconds = settleMilliseconds;
+        var pointerActivations = 0;
         var validationActionIndex = 0;
         foreach (var action in actions.EnumerateArray())
         {
@@ -217,7 +219,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                         var count = type == "double_click"
                             ? 2
                             : OptionalBoundedInt(action, "count", 1, 1, 3);
-                        estimatedMilliseconds += (count - 1L) * 65L;
+                        pointerActivations += count;
                         break;
                     case "mouse_down":
                         if (action.TryGetProperty("x", out _))
@@ -227,6 +229,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                         }
 
                         ValidateOptionalButton(action);
+                        pointerActivations++;
                         break;
                     case "mouse_up":
                         ValidateOptionalButton(action);
@@ -243,6 +246,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                             250,
                             0,
                             SecurityLimits.MaxDragMilliseconds);
+                        pointerActivations++;
                         break;
                     case "scroll":
                         if (action.TryGetProperty("display_id", out _))
@@ -291,6 +295,11 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     default:
                         throw InvalidPlan("unsupported_action_type", "Unsupported action type.", "type");
                 }
+
+                // Conservatively budget the full floor for every activation;
+                // the first may follow a click from the preceding batch.
+                estimatedMilliseconds += (long)pointerActivations * InputTimingPolicy.MinimumInterClickMilliseconds;
+                pointerActivations = 0;
 
                 if (estimatedMilliseconds > SecurityLimits.MaxBatchMilliseconds)
                 {
@@ -410,7 +419,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         _lastActionSurfaces = null;
     }
 
-    private void ExecuteAction(
+    private int ExecuteAction(
         JsonElement action,
         IReadOnlyList<MonitorDescriptor> monitors,
         Action checkOperation)
@@ -420,33 +429,31 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         {
             case "move":
                 InputController.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
-                break;
+                return 0;
             case "relative_move":
                 InputController.RelativeMove(RequiredInt(action, "x"), RequiredInt(action, "y"));
-                break;
+                return 0;
             case "click":
             case "double_click":
-                _input.Click(
+                return _input.Click(
                     Display(action, monitors),
                     RequiredInt(action, "x"),
                     RequiredInt(action, "y"),
                     OptionalString(action, "button", "left"),
                     type == "double_click" ? 2 : OptionalInt(action, "count", 1),
                     checkOperation);
-                break;
             case "mouse_down":
                 if (action.TryGetProperty("x", out _))
                 {
                     InputController.Move(Display(action, monitors), RequiredInt(action, "x"), RequiredInt(action, "y"));
                 }
 
-                _input.MouseDown(OptionalString(action, "button", "left"));
-                break;
+                return _input.BeginPointerActivation(OptionalString(action, "button", "left"), checkOperation);
             case "mouse_up":
-                _input.MouseUp(OptionalString(action, "button", "left"));
-                break;
+                _input.EndPointerActivation(OptionalString(action, "button", "left"));
+                return 0;
             case "drag":
-                _input.Drag(
+                return _input.Drag(
                     Display(action, monitors),
                     RequiredInt(action, "x"),
                     RequiredInt(action, "y"),
@@ -455,7 +462,6 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     OptionalInt(action, "duration_ms", 250),
                     OptionalString(action, "button", "left"),
                     checkOperation);
-                break;
             case "scroll":
                 MonitorDescriptor? display = null;
                 int? x = null;
@@ -473,27 +479,27 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     y,
                     ScrollTicks(OptionalInt(action, "scroll_y", 0)),
                     ScrollTicks(OptionalInt(action, "scroll_x", 0)));
-                break;
+                return 0;
             case "type":
                 InputController.TypeText(
                     RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction),
                     OptionalInt(action, "interval_ms", 0),
                     checkOperation);
-                break;
+                return 0;
             case "key":
                 _input.PressChord(
                     RequiredBoundedString(action, "keys", SecurityLimits.MaxKeyChordCharacters),
                     checkOperation);
-                break;
+                return 0;
             case "key_down":
                 _input.KeyDown(RequiredBoundedString(action, "keys", SecurityLimits.MaxKeyChordCharacters));
-                break;
+                return 0;
             case "key_up":
                 _input.KeyUp(RequiredBoundedString(action, "keys", SecurityLimits.MaxKeyChordCharacters));
-                break;
+                return 0;
             case "wait":
                 WaitCancellable(RequiredInt(action, "ms"), checkOperation);
-                break;
+                return 0;
             default:
                 throw new ArgumentException("Unsupported action type.");
         }
@@ -513,7 +519,11 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         checkOperation();
     }
 
-    private static ActionTiming CreateActionTiming(int actionIndex, JsonElement action, long startTimestamp)
+    private static ActionTiming CreateActionTiming(
+        int actionIndex,
+        JsonElement action,
+        long startTimestamp,
+        int pointerPacingMilliseconds)
     {
         var type = SafeActionType(action);
         return new ActionTiming(
@@ -522,7 +532,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             ElapsedMicroseconds(startTimestamp),
             type == "wait" ? SafeInteger(action, "ms") : null,
             type == "type" ? SafeString(action, "text")?.Length : null,
-            type == "type" ? SafeInteger(action, "interval_ms") ?? 0 : null);
+            type == "type" ? SafeInteger(action, "interval_ms") ?? 0 : null,
+            pointerPacingMilliseconds > 0 ? pointerPacingMilliseconds : null);
     }
 
     private static long ElapsedMicroseconds(long startTimestamp)

@@ -11,6 +11,8 @@ $performanceFixtureProject = Join-Path $root 'tools\PerformanceFixture\Performan
 $securityTestsProject = Join-Path $root 'tests\RapidPcUse.SecurityTests\RapidPcUse.SecurityTests.csproj'
 $agentTestsProject = Join-Path $root 'tests\RapidPcUse.AgentTests\RapidPcUse.AgentTests.csproj'
 $benchmarkTests = Join-Path $root 'tests\BenchmarkSupport.Tests.ps1'
+$realWorldBenchmarkTests = Join-Path $root 'tests\RealWorldBenchmark.Tests.ps1'
+$pluginRoutingTests = Join-Path $root 'tests\PluginRouting.Tests.ps1'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
@@ -61,18 +63,27 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Security regression tests failed.'
 }
 
-& $dotnet run --project $agentTestsProject -c Release --no-build
-if ($LASTEXITCODE -ne 0) {
-    throw 'PC agent regression tests failed.'
+$previousTestDotnetHost = $env:RAPID_PC_TEST_DOTNET_HOST
+try {
+    $env:RAPID_PC_TEST_DOTNET_HOST = $dotnet
+    & $dotnet run --project $agentTestsProject -c Release --no-build
+    if ($LASTEXITCODE -ne 0) {
+        throw 'PC agent regression tests failed.'
+    }
+}
+finally {
+    $env:RAPID_PC_TEST_DOTNET_HOST = $previousTestDotnetHost
 }
 
 & $benchmarkTests
+& $realWorldBenchmarkTests
+& $pluginRoutingTests
 
 $parseErrors = @()
 $scriptFiles = @(
-    Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File
-    Get-ChildItem -LiteralPath (Join-Path $root 'agent_install') -Filter '*.ps1' -File
-    Get-ChildItem -LiteralPath (Join-Path $root 'tests') -Filter '*.ps1' -File
+    Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File -Recurse
+    Get-ChildItem -LiteralPath (Join-Path $root 'agent_install') -Filter '*.ps1' -File -Recurse
+    Get-ChildItem -LiteralPath (Join-Path $root 'tests') -Filter '*.ps1' -File -Recurse
 )
 foreach ($script in $scriptFiles) {
     $tokens = $null

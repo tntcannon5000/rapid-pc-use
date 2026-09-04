@@ -1,10 +1,47 @@
 using System.Net;
 using System.Net.Http;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using RapidPcUse;
 using RapidPcUse.Agent;
 using RapidPcUse.Agent.Providers;
+using RapidPcUse.Knowledge;
+
+if (args is ["--process-isolation-probe"])
+{
+    var stdin = Console.In.ReadToEnd();
+    Console.WriteLine($"secret={Environment.GetEnvironmentVariable("RAPID_PC_USE_PROCESS_SECRET") ?? "<null>"};stdin={stdin.Length}");
+    return 0;
+}
+
+if (args is ["--output-flood-probe"])
+{
+    Console.Out.Write(new string('o', 32_768));
+    Console.Error.Write(new string('e', 32_768));
+    return 0;
+}
+
+if (args is ["--hold-lock-probe", var lockPath])
+{
+    using var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    Thread.Sleep(TimeSpan.FromMinutes(5));
+    return 0;
+}
+
+if (args is ["--spawn-child-probe", var dotnetHost, var pidPath, var lockPathForChild])
+{
+    Thread.Sleep(200);
+    using var child = Process.Start(new ProcessStartInfo(dotnetHost)
+    {
+        UseShellExecute = false,
+        ArgumentList = { typeof(RunbookFeatureTests).Assembly.Location, "--hold-lock-probe", lockPathForChild },
+    }) ?? throw new InvalidOperationException("Could not start containment child fixture.");
+    File.WriteAllText(pidPath, child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    Thread.Sleep(TimeSpan.FromMinutes(5));
+    return 0;
+}
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -20,13 +57,46 @@ var tests = new (string Name, Func<Task> Run)[]
     ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
+    ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
+    ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
     ("agent loop corrects a rejected action without releasing control", AgentLoopCorrectsRejectedAction),
     ("stale frames refresh without terminating low-level control", StaleFrameRefreshes),
     ("provider faults retry inside the high-level loop", ProviderFaultRetries),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
+    ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
+    ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
     ("confirmation pauses and resumes without retaining a frame", ConfirmationPausesAndResumes),
+    ("outer assistance pauses and continues without carrying approval", HandoffPausesAndContinues),
+    ("outer assistance expires and requires a nonempty schema request", HandoffExpiryAndSchemaAreBounded),
+    ("outer assistance clears one-shot confirmation authority", HandoffClearsApprovedRisk),
+    ("remote content changes use their own authority boundary", RemoteContentChangeUsesDedicatedScope),
+    ("PC knowledge persists bounded versioned facts atomically", RunbookFeatureTests.KnowledgeStorePersistsBoundedFacts),
+    ("PC knowledge rejects oversized updates without replacing the store", RunbookFeatureTests.KnowledgeStoreRejectsOversizedUpdates),
+    ("driver-local retrieval and runbook launch stay inside the fast loop", RunbookFeatureTests.LocalRouteStaysInsideFastLoop),
+    ("runbook steps require retrieval in the current run", RunbookFeatureTests.UnretrievedRunbookIsRejected),
+    ("runbook execution is bound to the exact retrieved step snapshot", RunbookFeatureTests.InventedRunbookStepIsRejected),
+    ("local runbook launch has an explicit one-shot authority boundary", RunbookFeatureTests.RunbookLaunchRequiresAuthority),
+    ("trusted local app steps enforce their declared effect authority", RunbookFeatureTests.RunbookEffectRequiresAuthority),
+    ("effectful process steps accumulate exact one-shot authority", RunbookFeatureTests.EffectfulProcessAccumulatesExactAuthority),
+    ("effectful runbook attempts consume budget and cannot be repeated", RunbookFeatureTests.EffectfulRunbookAttemptIsAtMostOnce),
+    ("irrelevant fuzzy runbooks do not arm finish verifiers", RunbookFeatureTests.IrrelevantRunbookDoesNotGateFinish),
+    ("required read-only runbook verification blocks premature finish", RunbookFeatureTests.RequiredRunbookVerificationBlocksFinish),
+    ("required runbook verification also gates local completion guards", RunbookFeatureTests.RequiredRunbookVerificationGatesCompletionGuard),
+    ("native mutations invalidate prior runbook verification", RunbookFeatureTests.NativeMutationRearmsRunbookVerifier),
+    ("elevated runbook targets hand off before secure desktop", RunbookFeatureTests.ElevatedRunbookHandsOffBeforeDispatch),
+    ("PC runbooks persist trusted structured routes without leaking paths inward", RunbookFeatureTests.RunbookStorePersistsStructuredRoutes),
+    ("trusted command runbooks execute fixed arguments with bounded output", RunbookFeatureTests.TrustedProcessRunbookExecutesFixedArguments),
+    ("trusted commands close stdin and remove inherited secrets", RunbookFeatureTests.TrustedProcessIsolatesInputAndEnvironment),
+    ("trusted command timeout contains descendants and output floods", RunbookFeatureTests.TrustedProcessContainsLifetimeAndOutput),
+    ("verified runbook performance persists and ranks equivalent routes", RunbookFeatureTests.RunbookPerformanceLearnsRoutePreference),
+    ("terminal profiling includes route-learning persistence", RunbookFeatureTests.RouteLearningIsIncludedInElapsedTime),
+    ("runbook result context remains bounded end to end", RunbookFeatureTests.RunbookResultContextIsBounded),
+    ("malformed local memory cannot terminate an automatic PC run", RunbookFeatureTests.CorruptMemoryDoesNotTerminateRun),
+    ("runbook app interfaces are loopback-only and effect-attributed", RunbookFeatureTests.RunbookLocalInterfacesAreLoopbackAndAttributed),
+    ("MCP runbook schema matches the structured route handler", RunbookFeatureTests.McpRunbookSchemaMatchesHandler),
+    ("web fast start never selects a competing foreground browser", RunbookFeatureTests.FastStartRejectsCompetingBrowser),
     ("foreground process scope blocks out-of-scope input", ProcessScopeBlocksInput),
     ("repeated no-progress actions trigger recovery and continue", NoProgressRecovers),
     ("physical Escape cancels an in-flight provider call", TakeoverCancelsProvider),
@@ -367,6 +437,56 @@ static Task McpRunNormalizesOversizedBudgets()
     return Task.CompletedTask;
 }
 
+static Task McpRunUsesTrustedFastStart()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Finish", [], []);
+    using var provider = new RecordingProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Fixture settles", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Fixture completed.", state, "Fixture visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
+    var launcher = new FakeLaunchCoordinator();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"execution_context\":\"Trusted fixture route.\",\"launch_uri\":\"https://example.com/fixture\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    Assert(response.RootElement.GetProperty("result").GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
+        "fast-start MCP run did not complete");
+    Assert(launcher.LaunchUris.SequenceEqual(["https://example.com/fixture"]), "trusted launch did not execute exactly once");
+    Assert(desktop.ActiveWindowObserveCount == 2, "fast start did not capture both pre-launch and post-launch state");
+    Assert(desktop.ActionBatches.Count == 1, "fast-start action did not capture its normal post-action state");
+    Assert(provider.Requests.Count == 2, "fast-start fixture used the wrong number of model turns");
+    Assert(provider.Requests[0].Observation.FrameId == 2, "the first model turn saw the pre-launch frame");
+    Assert(provider.Requests[0].OuterContext == "Trusted fixture route.", "the first model turn missed execution context");
+    Assert(string.IsNullOrEmpty(provider.Requests[1].OuterContext), "execution context leaked beyond the first model turn");
+    return Task.CompletedTask;
+}
+
+static Task FastStartActivationFailureBlocksBeforeModel()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Finish", [], []);
+    using var provider = new RecordingProvider(
+    [
+        new FinishDecision("This decision must never be requested.", state, "Fixture visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1])]);
+    var launcher = new FakeLaunchCoordinator(targetActivated: false, foregroundProcess: "protected-app");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    var result = loop.Run(Request(maxNoProgress: 3) with { LaunchUri = "https://example.com/fixture" });
+
+    Assert(result.Status == PcAgentStatus.Blocked, "failed direct activation did not block safely");
+    Assert(result.Summary.Contains("protected foreground process", StringComparison.Ordinal),
+        "activation blocker was not explained");
+    Assert(provider.Requests.Count == 0, "a model turn received the unrelated foreground frame");
+    Assert(desktop.ActiveWindowObserveCount == 1, "activation failure captured an unrelated post-launch frame");
+    Assert(desktop.StopCount == 1, "activation failure did not release desktop control");
+    return Task.CompletedTask;
+}
+
 static Task McpActValidationIsRecoverable()
 {
     using var desktop = new FakeDesktop([]);
@@ -456,6 +576,77 @@ static Task ScrollSchemasUseSharedLimits()
     Assert(innerScroll.GetProperty("minimum").GetInt32() == SecurityLimits.MinScrollDeltaPerAction, "inner scroll minimum drifted");
     Assert(innerScroll.GetProperty("maximum").GetInt32() == SecurityLimits.MaxScrollDeltaPerAction, "inner scroll maximum drifted");
     Assert(DesktopController.ScrollTicks(591) == 6, "591 delta units should become six wheel ticks");
+    return Task.CompletedTask;
+}
+
+static Task McpKnowledgeUpdateSchemaMatchesHandler()
+{
+    using var desktop = new FakeDesktop([]);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, null, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var update = response.RootElement.GetProperty("result").GetProperty("tools")
+        .EnumerateArray()
+        .Single(tool => tool.GetProperty("name").GetString() == "pc_knowledge_update");
+    var variants = update.GetProperty("inputSchema").GetProperty("oneOf").EnumerateArray().ToArray();
+    Assert(variants.Length == 2, "knowledge update schema did not publish two operation variants");
+    var upsert = variants.Single(variant =>
+        variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "upsert");
+    var upsertRequired = upsert.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToHashSet();
+    foreach (var property in new[] { "operation", "key", "kind", "subject", "fact", "source" })
+    {
+        Assert(upsertRequired.Contains(property), $"upsert schema omitted required handler field {property}");
+    }
+
+    var forget = variants.Single(variant =>
+        variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "forget");
+    var forgetRequired = forget.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray();
+    Assert(forgetRequired.SequenceEqual(new[] { "operation", "key" }), "forget schema requires fields its handler does not use");
+    return Task.CompletedTask;
+}
+
+static Task McpKnowledgeFailurePreservesPausedRun()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"rapid-pc-knowledge-corrupt-{Guid.NewGuid():N}");
+    var path = Path.Combine(directory, "knowledge.json");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(path, "not-json");
+        var state = new AgentWorkingState("Fixture visible", [], "Resolve route", [], []);
+        using var provider = new ReplayPcModelProvider(
+        [
+            new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+            new FinishDecision("Fixture completed.", state, "Fixture visible"),
+        ]);
+        using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+        using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+        var paused = loop.Run(Request(maxNoProgress: 3));
+        var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+        const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_knowledge_search\",\"arguments\":{\"query\":\"fixture\"}}}\n";
+        using var reader = new StringReader(input);
+        using var writer = new StringWriter();
+        var knowledgeTools = new PcKnowledgeTools(new PcKnowledgeStore(path));
+        new McpServer(desktop, loop, reader, writer, knowledgeTools).Run();
+        using var response = JsonDocument.Parse(writer.ToString().Trim());
+        var result = response.RootElement.GetProperty("result");
+        Assert(!result.GetProperty("isError").GetBoolean(), "knowledge failure became a terminal tool error");
+        Assert(result.GetProperty("structuredContent").GetProperty("desktop_state_unchanged").GetBoolean(),
+            "knowledge failure did not report the preserved desktop state");
+        Assert(desktop.StopCount == 1, "knowledge failure performed desktop failure cleanup");
+        var completed = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "No saved route was available; continue visually.");
+        Assert(completed.Status == PcAgentStatus.Completed, "knowledge failure destroyed the paused handoff session");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     return Task.CompletedTask;
 }
 
@@ -550,6 +741,116 @@ static Task ConfirmationPausesAndResumes()
     return Task.CompletedTask;
 }
 
+static Task HandoffPausesAndContinues()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Resolve the app route", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+        new FinishDecision("Fixture route resolved.", state, "Fixture remains visible"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    Assert(paused.Status == PcAgentStatus.NeedsHandoff && paused.Handoff is not null, "run did not request outer assistance");
+    Assert(paused.Confirmation is null, "handoff was confused with confirmation");
+    Assert(desktop.StopCount == 1 && loop.RetainedImageCount == 0, "handoff retained desktop control or images");
+    var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff("wrong-session", handoff.HandoffId, "Verified route."));
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff(paused.SessionId, "wrong-handoff", "Verified route."));
+    var completed = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "The verified route is fixture://main.");
+    Assert(completed.Status == PcAgentStatus.Completed, "outer-assisted run did not continue");
+    Assert(desktop.StopCount == 2, "continued run did not release control");
+    Expect<InvalidOperationException>(() => loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "Replay."));
+    return Task.CompletedTask;
+}
+
+static Task HandoffExpiryAndSchemaAreBounded()
+{
+    var clock = new AdjustableTimeProvider(new DateTimeOffset(2026, 8, 21, 12, 0, 0, TimeSpan.Zero));
+    var state = new AgentWorkingState("Fixture visible", [], "Resolve route", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Find the verified fixture route.", state),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), timeProvider: clock);
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    clock.Advance(SecurityLimits.AgentHandoffLifetime + TimeSpan.FromSeconds(1));
+    var expired = loop.ResumeHandoff(paused.SessionId, handoff.HandoffId, "Verified route.");
+    Assert(expired.Status == PcAgentStatus.Blocked, "expired handoff resumed desktop control");
+    Assert(desktop.StopCount == 1, "expired handoff changed the stopped desktop state");
+
+    using var schemaProvider = new OpenAiResponsesProvider("test-key", Options(), new HttpClient(new NeverSendHandler()));
+    var payload = schemaProvider.BuildRequest(new PcModelTurnRequest(
+        "Resolve the fixture route.",
+        Scope(),
+        AgentWorkingState.Empty,
+        [],
+        Observation(2, [2]),
+        1,
+        10,
+        null));
+    using var request = JsonDocument.Parse(payload);
+    var handoffRequest = request.RootElement.GetProperty("tools")
+        .EnumerateArray()
+        .Single(tool => tool.GetProperty("name").GetString() == "computer_handoff")
+        .GetProperty("parameters")
+        .GetProperty("properties")
+        .GetProperty("handoff_request");
+    Assert(handoffRequest.GetProperty("minLength").GetInt32() == 1, "handoff tool schema allows an empty request");
+    return Task.CompletedTask;
+}
+
+static Task HandoffClearsApprovedRisk()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":0}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
+        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Resolve the verified route.", state),
+        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var confirmationPause = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = confirmationPause.Confirmation ?? throw new InvalidOperationException("confirmation is missing");
+    var handoffPause = loop.Resume(confirmationPause.SessionId, confirmation.ConfirmationId, approve: true);
+    var handoff = handoffPause.Handoff ?? throw new InvalidOperationException("handoff is missing");
+    var secondConfirmation = loop.ResumeHandoff(handoffPause.SessionId, handoff.HandoffId, "Verified route.");
+    Assert(secondConfirmation.Status == PcAgentStatus.NeedsConfirmation,
+        "one-shot confirmation authority crossed the handoff boundary");
+    Assert(desktop.ActionBatches.Count == 0, "sensitive action executed with stale approval");
+    return Task.CompletedTask;
+}
+
+static Task RemoteContentChangeUsesDedicatedScope()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"key\",\"keys\":\"DELETE\"}]");
+    var decision = new ActDecision(
+        actions.RootElement.Clone(),
+        AgentWorkingState.Empty,
+        "Remote message is removed",
+        new HashSet<PcRiskFlag> { PcRiskFlag.RemoteContentChange });
+    var policy = new ActionPolicy(new FixedWindowInspector());
+    var denied = policy.Evaluate(decision, Scope(), approvedRisk: null);
+    Assert(denied.ConfirmationRisk == PcRiskFlag.RemoteContentChange, "remote mutation did not request its dedicated authority");
+    var remoteOnly = policy.Evaluate(
+        decision,
+        Scope() with { AllowRemoteContentChanges = true },
+        approvedRisk: null);
+    Assert(remoteOnly.ConfirmationRisk == PcRiskFlag.LocalDeletion,
+        "a model-declared remote risk suppressed the driver's DELETE inference");
+    var allowed = policy.Evaluate(
+        decision,
+        Scope() with { AllowRemoteContentChanges = true, AllowLocalDeletion = true },
+        approvedRisk: null);
+    Assert(allowed.Allowed && allowed.ConfirmationRisk is null, "fully scoped remote DELETE did not pass policy");
+    return Task.CompletedTask;
+}
+
 static Task ProcessScopeBlocksInput()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
@@ -641,6 +942,7 @@ static PcAgentOptions Options() => new(
 static PcRunScope Scope() => new(
     new HashSet<string>(StringComparer.OrdinalIgnoreCase),
     AllowExternalCommunication: false,
+    AllowRemoteContentChanges: false,
     AllowLocalDeletion: false,
     AllowCredentials: true,
     AllowPurchases: false,
@@ -757,7 +1059,7 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
         DesktopController.ValidateActionPlan(actions, settleMilliseconds);
         ActionBatches.Add(actions.Clone());
         var timing = actions.EnumerateArray()
-            .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null))
+            .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null, null))
             .ToArray();
         var observation = _observations.Count == 0 ? null : _observations.Dequeue();
         if (_partialCompletedActions is int completedActions)
@@ -838,6 +1140,49 @@ internal sealed class FlakyProvider(int failures) : IPcModelProvider
 
     public void Dispose()
     {
+    }
+}
+
+internal sealed class RecordingProvider(IEnumerable<PcAgentDecision> decisions) : IPcModelProvider
+{
+    private readonly Queue<PcAgentDecision> _decisions = new(decisions);
+
+    internal List<PcModelTurnRequest> Requests { get; } = [];
+    public string Name => "recording";
+    public string Model => "fixture";
+
+    public Task<PcModelTurnResult> DecideAsync(PcModelTurnRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Requests.Add(request);
+        var decision = _decisions.Dequeue();
+        return Task.FromResult(new PcModelTurnResult(
+            decision,
+            Name,
+            Model,
+            0,
+            request.Observation.Frames.Count,
+            request.Observation.Frames.Sum(frame => frame.Bytes.Length),
+            0,
+            new ProviderLocalStageTimings(0, 0, 0, 0),
+            new ProviderTurnTimings(0, 0, 0, 0, 0),
+            new ProviderUsage(0, 0, 0, 0)));
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class FakeLaunchCoordinator(bool targetActivated = true, string foregroundProcess = "test") : IPcLaunchCoordinator
+{
+    internal List<string> LaunchUris { get; } = [];
+
+    public PcLaunchTiming Launch(string launchUri, Action checkOperation)
+    {
+        checkOperation();
+        LaunchUris.Add(launchUri);
+        return new PcLaunchTiming(100, 200, 300, "https", true, targetActivated, foregroundProcess);
     }
 }
 
@@ -923,4 +1268,13 @@ internal sealed class ErrorHandler(HttpStatusCode statusCode, string responseBod
             Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
         });
     }
+}
+
+internal sealed class AdjustableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private DateTimeOffset _utcNow = utcNow;
+
+    public override DateTimeOffset GetUtcNow() => _utcNow;
+
+    internal void Advance(TimeSpan duration) => _utcNow += duration;
 }

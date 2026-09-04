@@ -1,7 +1,7 @@
 {
   "name": "rapid-pc-use",
-  "version": "0.1.3",
-  "description": "High-speed native Windows desktop control for Codex and ChatGPT desktop.",
+  "version": "0.2.0",
+  "description": "High-speed native control for visual Windows desktop tasks in Codex and ChatGPT desktop.",
   "author": {
     "name": "Rapid PC Use contributors"
   },
@@ -17,8 +17,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Rapid PC Use",
-    "shortDescription": "Fast native control of any Windows app",
-    "longDescription": "Operate the full Windows desktop with rapid per-monitor screenshots, real mouse and keyboard input, batched actions, and physical-Escape takeover.",
+    "shortDescription": "Fast control for visual Windows GUI tasks",
+    "longDescription": "Operate visual Windows interfaces with rapid screenshots, real mouse and keyboard input, batched actions, and physical-Escape takeover while direct tools remain preferred for non-visual work.",
     "developerName": "Rapid PC Use contributors",
     "category": "Developer Tools",
     "capabilities": [

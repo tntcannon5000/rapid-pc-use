@@ -1,5 +1,6 @@
 using RapidPcUse.Agent;
 using RapidPcUse.Agent.Providers;
+using RapidPcUse.Knowledge;
 
 namespace RapidPcUse;
 
@@ -13,13 +14,19 @@ internal sealed class RapidPcHost : IDisposable
 
     internal RapidPcHost()
     {
+        var knowledgeStore = new PcKnowledgeStore();
+        var runbookStore = new PcRunbookStore();
         try
         {
             var options = PcAgentOptions.FromEnvironment();
             if (options.Enabled)
             {
                 var provider = ProviderFactory.Create(options);
-                _agent = new PcAgentLoop(_desktop, provider, options);
+                _agent = new PcAgentLoop(
+                    _desktop,
+                    provider,
+                    options,
+                    localRoutes: new PcLocalRouteRuntime(knowledgeStore, runbookStore));
                 if (provider is IWarmablePcModelProvider warmable)
                 {
                     _providerWarmupCancellation = new CancellationTokenSource();
@@ -41,7 +48,13 @@ internal sealed class RapidPcHost : IDisposable
                 exception: exception);
         }
 
-        _mcp = new McpServer(_desktop, _agent, Console.In, Console.Out);
+        _mcp = new McpServer(
+            _desktop,
+            _agent,
+            Console.In,
+            Console.Out,
+            new PcKnowledgeTools(knowledgeStore),
+            new PcRunbookTools(runbookStore));
     }
 
     internal void Run() => _mcp.Run();

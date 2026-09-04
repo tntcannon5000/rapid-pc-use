@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible Rapid PC Use defect.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private screenshots, message contents, or unredacted logs. Report security vulnerabilities privately using the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Rapid PC Use version or commit
+      placeholder: 0.2.0 or a full commit SHA
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Route
+      options:
+        - pc_run / high-level loop
+        - pc_observe and pc_act / low-level route
+        - installation or startup
+        - knowledge or runbooks
+        - benchmark or profiler
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: takeover
+    attributes:
+      label: Did physical Escape return control?
+      options:
+        - Yes
+        - No
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include only bounded, reviewed excerpts with private data removed.

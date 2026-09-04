@@ -146,7 +146,7 @@ function ConvertFrom-RapidPcRunResult {
     }
 
     $status = [string]$Result.status
-    if ($status -notin @('completed', 'needs_confirmation', 'blocked', 'limit_reached', 'failed', 'denied', 'user_takeover')) {
+    if ($status -notin @('completed', 'needs_confirmation', 'needs_handoff', 'blocked', 'limit_reached', 'failed', 'denied', 'user_takeover')) {
         throw 'The pc_run result returned an unknown status.'
     }
     $agentRunId = [string]$Result.sessionId

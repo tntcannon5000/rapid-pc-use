@@ -9,6 +9,12 @@ internal sealed class InputController
     private readonly object _gate = new();
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly HashSet<string> _heldButtons = new(StringComparer.OrdinalIgnoreCase);
+    private readonly PointerClickPacer _clickPacer;
+
+    internal InputController(PointerClickPacer? clickPacer = null)
+    {
+        _clickPacer = clickPacer ?? new PointerClickPacer();
+    }
 
     internal static void Move(MonitorDescriptor monitor, int x, int y)
     {
@@ -44,7 +50,7 @@ internal sealed class InputController
         SendMouse(NativeMethods.MouseeventfMove, 0, x, y);
     }
 
-    internal void Click(
+    internal int Click(
         MonitorDescriptor monitor,
         int x,
         int y,
@@ -53,17 +59,16 @@ internal sealed class InputController
         Action checkOperation)
     {
         Move(monitor, x, y);
+        var pacingMilliseconds = 0;
         for (var index = 0; index < count; index++)
         {
-            checkOperation();
+            pacingMilliseconds += _clickPacer.BeforeClick(checkOperation);
             MouseDown(button);
             MouseUp(button);
-            if (index + 1 < count)
-            {
-                Thread.Sleep(65);
-                checkOperation();
-            }
+            _clickPacer.MarkReleased();
         }
+
+        return pacingMilliseconds;
     }
 
     internal void MouseDown(string button)
@@ -94,7 +99,7 @@ internal sealed class InputController
         }
     }
 
-    internal void Drag(
+    internal int Drag(
         MonitorDescriptor monitor,
         int fromX,
         int fromY,
@@ -105,6 +110,7 @@ internal sealed class InputController
         Action checkOperation)
     {
         Move(monitor, fromX, fromY);
+        var pacingMilliseconds = _clickPacer.BeforeClick(checkOperation);
         MouseDown(button);
         try
         {
@@ -127,7 +133,23 @@ internal sealed class InputController
         finally
         {
             MouseUp(button);
+            _clickPacer.MarkReleased();
         }
+
+        return pacingMilliseconds;
+    }
+
+    internal int BeginPointerActivation(string button, Action checkOperation)
+    {
+        var pacingMilliseconds = _clickPacer.BeforeClick(checkOperation);
+        MouseDown(button);
+        return pacingMilliseconds;
+    }
+
+    internal void EndPointerActivation(string button)
+    {
+        MouseUp(button);
+        _clickPacer.MarkReleased();
     }
 
     internal static void Scroll(MonitorDescriptor? monitor, int? x, int? y, int verticalTicks, int horizontalTicks)
@@ -244,8 +266,10 @@ internal sealed class InputController
 
     internal void ReleaseAll()
     {
+        var releasedPointer = false;
         lock (_gate)
         {
+            releasedPointer = _heldButtons.Count > 0;
             var errors = new List<Exception>();
             ReleaseHeldInputs(errors);
             if (_heldButtons.Count > 0 || _heldKeys.Count > 0)
@@ -259,6 +283,11 @@ internal sealed class InputController
             {
                 throw new AggregateException("One or more held native inputs could not be released.", errors);
             }
+        }
+
+        if (releasedPointer)
+        {
+            _clickPacer.MarkReleased();
         }
     }
 

@@ -80,6 +80,7 @@ foreach ($completed in @($session | Where-Object { $_.event -eq 'tool.completed'
             RequestedWaitMs = $action.requested_wait_milliseconds
             TypedCodeUnits = $action.typed_code_units
             TypeIntervalMs = $action.type_interval_milliseconds
+            PointerPacingMs = $action.pointer_pacing_milliseconds
         })
     }
 
@@ -127,6 +128,15 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
     $routeEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.decision_routed' })
     $iterationEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.iteration_completed' })
     $observationEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.observation_captured' })
+    $knowledgeEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.knowledge_retrieved' })
+    $runbookStepEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.runbook_step_executed' })
+    $runbookUncertainEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.runbook_step_effect_uncertain' })
+    $runbookFailedEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.runbook_step_attempt_failed' })
+    $routeLearningEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.route_learning_completed' })
+    $routeLearningFailedEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.route_learning_unavailable' })
+    $runbookAttemptEvents = @($runbookStepEvents) + @($runbookUncertainEvents) + @($runbookFailedEvents)
+    $runbookDispatchedEvents = @($runbookStepEvents) + @($runbookUncertainEvents)
+    $launchEvent = $agentEvents | Where-Object { $_.event -eq 'agent.launch_completed' } | Select-Object -Last 1
     $recoveryEvents = @($agentEvents | Where-Object { $_.event -eq 'agent.recovery' })
     if ($null -ne $agentCompleted) {
         $activeElapsedMs = [double]$agentCompleted.data.elapsed_ms
@@ -153,8 +163,24 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
             }
         })
         $actionMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.action_execution_us / 1000 } | Measure-Object -Sum).Sum)
+        $pointerPacingMs = [double](($iterationEvents | ForEach-Object {
+            $_.data.actions | ForEach-Object { [double]$_.pointer_pacing_milliseconds }
+        } | Measure-Object -Sum).Sum)
         $settleMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.settle_elapsed_us / 1000 } | Measure-Object -Sum).Sum)
         $captureMs = [double](($iterationEvents | ForEach-Object { [double]$_.data.capture_total_us / 1000 } | Measure-Object -Sum).Sum)
+        $knowledgeRetrievalMs = [double](($knowledgeEvents | ForEach-Object { [double]$_.data.elapsed_us / 1000 } | Measure-Object -Sum).Sum)
+        $runbookStepMs = [double](($runbookAttemptEvents | ForEach-Object { [double]$_.data.total_us / 1000 } | Measure-Object -Sum).Sum)
+        $runbookDispatchMs = [double](($runbookDispatchedEvents | ForEach-Object { [double]$_.data.dispatch_us / 1000 } | Measure-Object -Sum).Sum)
+        $runbookReadinessMs = [double](($runbookStepEvents | ForEach-Object { [double]$_.data.readiness_us / 1000 } | Measure-Object -Sum).Sum)
+        $routeLearningMs = [double](($routeLearningEvents | ForEach-Object { [double]$_.data.elapsed_us / 1000 } | Measure-Object -Sum).Sum)
+        $runbookKindCounts = @($runbookAttemptEvents | Group-Object {
+            if ($null -ne $_.data.PSObject.Properties['step_kind'] -and -not [string]::IsNullOrWhiteSpace([string]$_.data.step_kind)) {
+                [string]$_.data.step_kind
+            }
+            else {
+                'legacy_unspecified'
+            }
+        } | ForEach-Object { [pscustomobject]@{ Kind = $_.Name; Count = $_.Count } })
         $inputTokens = [long](($providerEvents | ForEach-Object { [long]$_.data.usage.input_tokens } | Measure-Object -Sum).Sum)
         $cachedTokens = [long](($providerEvents | ForEach-Object { [long]$_.data.usage.cached_input_tokens } | Measure-Object -Sum).Sum)
         $outputTokens = [long](($providerEvents | ForEach-Object { [long]$_.data.usage.output_tokens } | Measure-Object -Sum).Sum)
@@ -186,6 +212,12 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
             InitialCaptureMaterializeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.materialize_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
             InitialCaptureResizeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.resize_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
             InitialCaptureEncodeMs = [Math]::Round([double](($initialCaptureStages | ForEach-Object { [double]$_.encode_microseconds / 1000 } | Measure-Object -Sum).Sum), 3)
+            InitialLaunchMs = if ($null -eq $launchEvent) { $null } else { [Math]::Round([double]$launchEvent.data.total_us / 1000, 3) }
+            LaunchDispatchMs = if ($null -eq $launchEvent) { $null } else { [Math]::Round([double]$launchEvent.data.dispatch_us / 1000, 3) }
+            LaunchReadinessWaitMs = if ($null -eq $launchEvent) { $null } else { [Math]::Round([double]$launchEvent.data.readiness_wait_us / 1000, 3) }
+            LaunchTargetFound = if ($null -eq $launchEvent) { $null } else { [bool]$launchEvent.data.target_found }
+            LaunchTargetActivated = if ($null -eq $launchEvent) { $null } else { [bool]$launchEvent.data.target_activated }
+            LaunchForegroundProcess = if ($null -eq $launchEvent) { $null } else { [string]$launchEvent.data.foreground_process }
             ActionsPerSecond = if ($activeElapsedMs -le 0) { $null } else { [Math]::Round(1000 * $actionsExecuted / $activeElapsedMs, 3) }
             ActionsPerModelTurn = if ($providerEvents.Count -eq 0) { $null } else { [Math]::Round([double]$actionsExecuted / $providerEvents.Count, 3) }
             OuterMcpCallsAvoided = [Math]::Max(0, $providerEvents.Count - 1)
@@ -220,8 +252,25 @@ if (-not [string]::IsNullOrWhiteSpace($AgentRunId)) {
                 [Math]::Round((Get-ProfilePercentile $outputFillValues 0.95), 3)
             }
             TotalActionExecutionMs = [Math]::Round($actionMs, 3)
+            TotalPointerPacingMs = [Math]::Round($pointerPacingMs, 3)
             TotalSettleMs = [Math]::Round($settleMs, 3)
             TotalCaptureMs = [Math]::Round($captureMs, 3)
+            KnowledgeRetrievals = $knowledgeEvents.Count
+            TotalKnowledgeRetrievalMs = [Math]::Round($knowledgeRetrievalMs, 3)
+            MaximumRetrievedContextCharacters = ($knowledgeEvents | ForEach-Object { [int]$_.data.context_characters } | Measure-Object -Maximum).Maximum
+            RunbookStepsExecuted = $runbookStepEvents.Count
+            RunbookStepAttempts = $runbookAttemptEvents.Count
+            RunbookStepFailures = $runbookFailedEvents.Count
+            RunbookUncertainEffects = $runbookUncertainEvents.Count
+            RunbookStepKinds = $runbookKindCounts
+            TotalRunbookStepMs = [Math]::Round($runbookStepMs, 3)
+            TotalRunbookDispatchMs = [Math]::Round($runbookDispatchMs, 3)
+            TotalRunbookReadinessMs = [Math]::Round($runbookReadinessMs, 3)
+            RunbookTargetsObserved = @($runbookStepEvents | Where-Object { [bool]$_.data.target_observed }).Count
+            RunbookExistingTargetsReused = @($runbookStepEvents | Where-Object { [bool]$_.data.reused_existing_target }).Count
+            RouteLearningSamples = [int](($routeLearningEvents | ForEach-Object { [int]$_.data.sample_count } | Measure-Object -Sum).Sum)
+            TotalRouteLearningMs = [Math]::Round($routeLearningMs, 3)
+            RouteLearningFailures = $routeLearningFailedEvents.Count
             InputTokens = $inputTokens
             CachedInputTokens = $cachedTokens
             CachePercent = if ($inputTokens -le 0) { $null } else { [Math]::Round(100 * [double]$cachedTokens / $inputTokens, 1) }

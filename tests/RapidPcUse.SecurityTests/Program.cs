@@ -18,6 +18,8 @@ var tests = new (string Name, Action Run)[]
     ("image context telemetry recognizes exact repeats without exposing hashes", ImageContextTelemetryRecognizesRepeats),
     ("diagnostics redact exception-controlled data", DiagnosticsAreRedacted),
     ("zero-interval text builds bounded native input batches", TextInputBatchesAreBounded),
+    ("pointer clicks enforce the minimum inter-click interval", PointerClicksArePaced),
+    ("direct launch URIs are narrowly allowlisted", DirectLaunchUrisAreAllowlisted),
     ("bounded parser fuzz is deterministic", BoundedParserFuzz),
 };
 
@@ -110,6 +112,56 @@ static void ActionBatchesAreBounded()
     Expect<PcActionPlanValidationException>(() => DesktopController.ValidateActionPlan(unknownDisplay.RootElement, 0, displays));
     using var unknownKey = JsonDocument.Parse("[{\"type\":\"key\",\"keys\":\"NOT_A_WINDOWS_KEY\"}]");
     Expect<PcActionPlanValidationException>(() => DesktopController.ValidateActionPlan(unknownKey.RootElement, 0, displays));
+}
+
+static void PointerClicksArePaced()
+{
+    long timestamp = 0;
+    var waitedMilliseconds = new List<int>();
+    var pacer = new PointerClickPacer(
+        timestampProvider: () => timestamp,
+        timestampFrequency: 1000,
+        wait: (milliseconds, checkOperation) =>
+        {
+            checkOperation();
+            waitedMilliseconds.Add(milliseconds);
+            timestamp += milliseconds;
+        });
+
+    var checks = 0;
+    pacer.BeforeClick(() => checks++);
+    pacer.MarkReleased();
+    timestamp += 17;
+    var measuredWait = pacer.BeforeClick(() => checks++);
+
+    Assert(waitedMilliseconds.SequenceEqual([63]), "the second click was not delayed to the 80 ms floor");
+    Assert(measuredWait == 63, "pointer pacing telemetry did not measure elapsed wait time");
+    Assert(checks == 2, "click pacing did not remain interruptible");
+
+    pacer.MarkReleased();
+    timestamp += InputTimingPolicy.MinimumInterClickMilliseconds;
+    pacer.BeforeClick(() => checks++);
+    Assert(waitedMilliseconds.Count == 1, "an already-paced click received an unnecessary delay");
+}
+
+static void DirectLaunchUrisAreAllowlisted()
+{
+    Assert(PcLaunchCoordinator.ValidateUri("https://example.com/path").Scheme == "https", "HTTPS launch was rejected");
+    Assert(PcLaunchCoordinator.ValidateUri("http://localhost:8080/").Scheme == "http", "HTTP launch was rejected");
+    Assert(PcLaunchCoordinator.ValidateUri("discord:").Scheme == "discord", "exact Discord launch was rejected");
+    foreach (var rejected in new[]
+             {
+                 "relative/path",
+                 "file:///C:/Windows/System32/cmd.exe",
+                 "ftp://example.com/file",
+                 "custom:payload",
+                 "discord://-/channels/1/2",
+                 "https://user:secret@example.com/",
+                 "https://example.com/\nnext",
+             })
+    {
+        Expect<ArgumentException>(() => PcLaunchCoordinator.ValidateUri(rejected));
+    }
 }
 
 static void ActionValidationReportsCorrectionData()

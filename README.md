@@ -1,5 +1,9 @@
 # Rapid PC Use
 
+[![CI](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/ci.yml/badge.svg)](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/codeql.yml/badge.svg)](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 Rapid PC Use is a clean-room, speed-first Windows computer-use driver for Codex and ChatGPT desktop. It gives the model the real Windows cursor and keyboard, one image per display, batched native actions, and physical-Escape takeover.
 
 This repository is a **public beta**. The capture backend is still GDI-based and the Windows executable is not Authenticode-signed. Use it only on a desktop where you can safely take over with the physical Escape key.
@@ -31,11 +35,21 @@ Press the physical **Escape** key at any time to cancel the current driver actio
 
 For a trusted, dedicated test machine only, `-EnableFastMode` is an explicit opt-in that disables per-call tool prompts. The default and recommended mode is prompted approval.
 
+## When Rapid PC Use runs
+
+The Codex skill is available for implicit selection, but it is deliberately scoped to work that requires visible Windows GUI state. Codex should continue to use direct shell commands, filesystem tools, APIs, connectors, and structured browser automation when those routes can complete and verify the task without meaningful tradeoffs. In particular, Rapid PC Use should not be invoked merely to type commands into an open terminal.
+
+Hybrid workflows are encouraged: a trusted direct command can inspect state or launch an application, then Rapid PC Use can take over only for the visual portion. When visual desktop control is actually required, the installed guidance prefers Rapid PC Use over built-in Computer Use.
+
 ## Hot path
 
 The active performance contract, measured baselines, and medium-horizon architecture plan live in [`docs/PERFORMANCE_ROADMAP.md`](./docs/PERFORMANCE_ROADMAP.md).
 
-When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. Rapid PC Use then owns the screenshot → model → native action loop inside the driver and returns a compact completion, blocker, limit, or confirmation result to the main Codex model. A rare confirmation continues through `pc_resume`.
+When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. It can include a compact first-turn execution brief and a strictly validated direct HTTP(S) or `discord:` launch. The driver automatically retrieves matching trusted local facts and structured runbooks before turn one; the inner controller can issue a later semantic query without returning to outer Codex. It can then select an opaque step ID for an exact stored local process launch, a fixed direct `.exe` invocation with fixed arguments and bounded output, or a fixed loopback app-interface call. It never supplies an executable path, command, URL, request body, argument, environment variable, or stdin. Rapid PC Use owns the screenshot → model → native action loop and returns a compact completion, blocker, limit, confirmation, or bounded outer-assistance result. Local process launches and commands require `allow_local_process_launches` or one-shot confirmation; a mutating command or app step independently requires its declared effect authority.
+
+Pointer activations have a native, cancellation-aware 80 ms button-up-to-button-down floor. The model still chooses longer waits at UI dependency frontiers, and every action batch is followed by a fresh capture before the next inner decision.
+
+The outer Codex planner can retrieve and maintain a compact local machine profile through `pc_knowledge_search`/`pc_knowledge_update` and ordered routes through `pc_runbook_search`/`pc_runbook_update`. Facts are stored at `%LOCALAPPDATA%\RapidPcUse\knowledge-v1.json`; runbooks at `%LOCALAPPDATA%\RapidPcUse\runbooks-v1.json`. A runbook can mark an exact read-only loopback GET as `required_before_finish`. The driver arms that gate only for an explicitly selected route or the single strongest exact multiword task match, rejects completion until the verifier succeeds, and re-arms it after later consequential native or runbook mutations. Fixed local commands must instead be selected explicitly so process-launch authority is always enforced. This prevents stale pixels or a stale earlier verifier from becoming a false report without letting unrelated fuzzy matches block the task. On terminal run completion the driver automatically persists only privacy-safe per-step attempts, success/failure/uncertain outcome, and timings; equally relevant routes are then ranked by measured reliability and successful latency. Semantic facts and executable procedures remain outer-curated after independent verification so hostile screen content cannot teach itself a trusted command. The inner visual model can retrieve both stores but cannot write either. Knowledge and runbooks are navigation context, never authority, and must not contain secrets, message contents, screenshots, or untrusted page instructions.
 
 This does not change the user-facing control experience: the same border is visible for the full active run, the same client approval applies to the high-level native-control call, and physical **Escape** still releases input, hides the border, and returns immediately to the main Codex model. Completed or paused runs release control themselves.
 
@@ -87,7 +101,19 @@ Configuration is read once when the driver starts:
 | `RAPID_PC_AGENT_IMAGE_DETAIL` | `original` after local 720p/900p downscaling |
 | `RAPID_PC_AGENT_CODEX_PATH` | Automatic: newest Codex desktop runtime, then `codex.exe` on `PATH` |
 
-Invalid or unavailable agent configuration disables only `pc_run`/`pc_resume`; it never prevents the native driver or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
+Invalid or unavailable agent configuration disables only `pc_run`/`pc_resume`/`pc_continue`; it never prevents the native driver, knowledge tools, or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
+
+## Real-world benchmark
+
+The opt-in benchmark defines Discord DM roundtrip/cleanup, YouTube state restoration, and Amazon order counting cells in randomized model order. It starts a new driver process and ephemeral provider thread for every cell, records prompt-to-result TTC plus TTFT/output fill/capture/action/pacing layers, and omits account content and screenshots from its artifact. Amazon's aggregate observed item/return counts are retained only in the locally ignored result.
+
+```powershell
+.\scripts\real-world-benchmark.ps1 -RunLive
+```
+
+The default command runs the read-only Amazon matrix across Luna, Terra, and Sol. Copy `benchmark-config/example.json` to the ignored `benchmark-config/local.json` and use only dedicated test accounts. The current Discord and YouTube checks are model-attested, not independent account-state verification, so each mutation invocation accepts exactly one scenario/model/repetition, requires `-AllowAccountMutations`, records completion as provisional, and then stops. Closing or killing an app establishes only the window/process start state; it does not prove that a message, Like, or playlist mutation was restored. A complete multi-model mutation matrix requires an independent account-level verifier.
+
+The privacy-filtered pass-one measurements and their limitations are recorded in [`docs/REAL_WORLD_BENCHMARK_RESULTS.md`](./docs/REAL_WORLD_BENCHMARK_RESULTS.md).
 
 Optional `pc_run` budgets are hints for shorter runs. If an outer agent supplies an integer below or above the configured range, the driver normalizes it to the nearest supported bound and continues; a harmless budget mismatch cannot terminate the visible workflow. Effective budgets are recorded in the agent-run telemetry, while requested numeric budgets are recorded without task or process-name content for diagnosis.
 
@@ -115,7 +141,9 @@ Before committing, run the complete build, formatting, metadata, security-test, 
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, decision routing, token/cache counters, progress signals, and aggregate run timing. Messages, task text, model prose, state text, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for change guidelines and [`docs/RELEASING.md`](./docs/RELEASING.md) for the maintainer release checklist.
+
+Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, knowledge retrieval, runbook dispatch/readiness, terminal route-learning persistence, decision routing, token/cache counters, progress signals, and aggregate run timing. `scripts/profile.ps1` projects local retrieval, runbook execution, and terminal route learning as separate totals. Messages, task text, model prose, state text, retrieved content, runbook keys/targets/results, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
 
 Profile the latest driver session with:
 

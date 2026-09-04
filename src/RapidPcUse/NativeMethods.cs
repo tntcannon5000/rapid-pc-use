@@ -60,6 +60,7 @@ internal static class NativeMethods
     internal const uint WdaExcludefromcapture = 0x00000011;
     internal const uint LwaColorkey = 0x00000001;
     internal const int SwShownoactivate = 4;
+    internal const int SwRestore = 9;
     internal const uint PmNoremove = 0x0000;
     internal const int PsSolid = 0;
     internal const int HollowBrush = 5;
@@ -282,6 +283,24 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetForegroundWindow(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool BringWindowToTop(nint window);
+
+    [DllImport("user32.dll")]
+    internal static extern nint SetActiveWindow(nint window);
+
+    [DllImport("user32.dll")]
+    internal static extern void SwitchToThisWindow(nint window, [MarshalAs(UnmanagedType.Bool)] bool altTab);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool AttachThreadInput(uint attach, uint attachTo, [MarshalAs(UnmanagedType.Bool)] bool value);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

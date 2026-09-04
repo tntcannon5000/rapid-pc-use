@@ -6,6 +6,7 @@ internal enum PcAgentStatus
 {
     Completed,
     NeedsConfirmation,
+    NeedsHandoff,
     Blocked,
     LimitReached,
     Failed,
@@ -16,14 +17,28 @@ internal enum PcAgentStatus
 internal enum PcAgentDecisionKind
 {
     Act,
+    Retrieve,
+    RunbookStep,
     Finish,
     Confirm,
+    Handoff,
     Blocked,
+}
+
+internal enum PcHandoffReason
+{
+    NeedKnowledge,
+    NeedTerminal,
+    NeedFilesystem,
+    SemanticAmbiguity,
+    UnsupportedCapability,
 }
 
 internal enum PcRiskFlag
 {
+    LocalProcessLaunch,
     ExternalCommunication,
+    RemoteContentChange,
     LocalDeletion,
     CredentialEntry,
     PurchaseOrFinancial,
@@ -35,10 +50,12 @@ internal enum PcRiskFlag
 internal sealed record PcRunScope(
     IReadOnlySet<string> AllowedProcesses,
     bool AllowExternalCommunication,
+    bool AllowRemoteContentChanges,
     bool AllowLocalDeletion,
     bool AllowCredentials,
     bool AllowPurchases,
-    bool AllowAccountOrPermissionChanges);
+    bool AllowAccountOrPermissionChanges,
+    bool AllowLocalProcessLaunches = false);
 
 internal sealed record PcRunLimits(
     int MaxModelTurns,
@@ -50,7 +67,9 @@ internal sealed record PcRunRequest(
     string Task,
     PcRunScope Scope,
     PcRunLimits Limits,
-    bool ReturnFinalScreenshot);
+    bool ReturnFinalScreenshot,
+    string ExecutionContext = "",
+    string LaunchUri = "");
 
 internal sealed record AgentWorkingState(
     string ScreenSummary,
@@ -79,6 +98,18 @@ internal sealed record ActDecision(
     string CompletionSummary = "")
     : PcAgentDecision(PcAgentDecisionKind.Act, NextState);
 
+internal sealed record RetrieveDecision(
+    string Query,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.Retrieve, NextState);
+
+internal sealed record RunbookStepDecision(
+    string RunbookKey,
+    string StepId,
+    string ExpectedChange,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.RunbookStep, NextState);
+
 internal sealed record FinishDecision(
     string Summary,
     AgentWorkingState FinalState,
@@ -90,6 +121,12 @@ internal sealed record ConfirmDecision(
     PcRiskFlag Risk,
     AgentWorkingState NextState)
     : PcAgentDecision(PcAgentDecisionKind.Confirm, NextState);
+
+internal sealed record HandoffDecision(
+    PcHandoffReason Reason,
+    string Request,
+    AgentWorkingState NextState)
+    : PcAgentDecision(PcAgentDecisionKind.Handoff, NextState);
 
 internal sealed record BlockedDecision(
     string Summary,
@@ -106,7 +143,9 @@ internal sealed record PcModelTurnRequest(
     int Turn,
     int RemainingActions,
     PcRiskFlag? ApprovedRisk,
-    string RunId = "");
+    string RunId = "",
+    string OuterContext = "",
+    string RetrievedContext = "");
 
 internal sealed record ProviderTurnTimings(
     long RequestBuildMicroseconds,
@@ -145,6 +184,12 @@ internal sealed record PcConfirmation(
     PcRiskFlag Risk,
     DateTimeOffset ExpiresUtc);
 
+internal sealed record PcHandoff(
+    string HandoffId,
+    PcHandoffReason Reason,
+    string Request,
+    DateTimeOffset ExpiresUtc);
+
 internal sealed record PcRunResult(
     PcAgentStatus Status,
     string SessionId,
@@ -154,6 +199,7 @@ internal sealed record PcRunResult(
     long ElapsedMilliseconds,
     string TelemetrySessionId,
     PcConfirmation? Confirmation,
+    PcHandoff? Handoff,
     Observation? FinalObservation);
 
 internal interface IPcDesktop
@@ -178,6 +224,20 @@ internal interface IPcModelProvider : IDisposable
     string Model { get; }
 
     Task<PcModelTurnResult> DecideAsync(PcModelTurnRequest request, CancellationToken cancellationToken);
+}
+
+internal sealed record PcLaunchTiming(
+    long DispatchMicroseconds,
+    long ReadinessWaitMicroseconds,
+    long TotalMicroseconds,
+    string Scheme,
+    bool TargetFound,
+    bool TargetActivated,
+    string ForegroundProcess);
+
+internal interface IPcLaunchCoordinator
+{
+    PcLaunchTiming Launch(string launchUri, Action checkOperation);
 }
 
 internal interface IWarmablePcModelProvider

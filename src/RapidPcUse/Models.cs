@@ -36,7 +36,8 @@ internal sealed record ActionTiming(
     long ElapsedMicroseconds,
     int? RequestedWaitMilliseconds,
     int? TypedCodeUnits,
-    int? TypeIntervalMilliseconds);
+    int? TypeIntervalMilliseconds,
+    int? PointerPacingMilliseconds);
 
 internal sealed record DesktopActResult(
     Observation? Observation,

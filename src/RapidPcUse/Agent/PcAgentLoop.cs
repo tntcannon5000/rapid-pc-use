@@ -4,10 +4,11 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using RapidPcUse.Agent.Providers;
+using RapidPcUse.Knowledge;
 
 namespace RapidPcUse.Agent;
 
-internal sealed class PcAgentLoop : IDisposable
+internal sealed partial class PcAgentLoop : IDisposable
 {
     private readonly object _gate = new();
     private readonly IPcDesktop _desktop;
@@ -15,6 +16,8 @@ internal sealed class PcAgentLoop : IDisposable
     private readonly PcAgentOptions _options;
     private readonly ActionPolicy _policy;
     private readonly ICompletionGuardVerifier _completionGuard;
+    private readonly IPcLaunchCoordinator _launcher;
+    private readonly IPcLocalRouteRuntime _localRoutes;
     private readonly TimeProvider _timeProvider;
     private readonly VisualMemory _visualMemory = new();
     private RunSession? _paused;
@@ -27,13 +30,17 @@ internal sealed class PcAgentLoop : IDisposable
         PcAgentOptions options,
         IForegroundWindowInspector? windowInspector = null,
         TimeProvider? timeProvider = null,
-        ICompletionGuardVerifier? completionGuard = null)
+        ICompletionGuardVerifier? completionGuard = null,
+        IPcLaunchCoordinator? launcher = null,
+        IPcLocalRouteRuntime? localRoutes = null)
     {
         _desktop = desktop;
         _provider = provider;
         _options = options;
         _policy = new ActionPolicy(windowInspector ?? new ForegroundWindowInspector());
         _completionGuard = completionGuard ?? new UiaCompletionGuardVerifier();
+        _launcher = launcher ?? new PcLaunchCoordinator();
+        _localRoutes = localRoutes ?? new PcLocalRouteRuntime();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -45,7 +52,7 @@ internal sealed class PcAgentLoop : IDisposable
         {
             if (_active || _paused is not null)
             {
-                throw new InvalidOperationException("A Rapid PC Use agent run is already active or awaiting confirmation.");
+                throw new InvalidOperationException("A Rapid PC Use agent run is already active or paused.");
             }
 
             _active = true;
@@ -82,6 +89,11 @@ internal sealed class PcAgentLoop : IDisposable
             }
 
             session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting confirmation.");
+            if (session.Handoff is not null)
+            {
+                throw new InvalidOperationException("The paused run is awaiting outer assistance, not confirmation.");
+            }
+
             var confirmation = session.Confirmation ?? throw new InvalidOperationException("The paused run has no confirmation request.");
             if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
                 !string.Equals(confirmation.ConfirmationId, confirmationId, StringComparison.Ordinal))
@@ -126,8 +138,98 @@ internal sealed class PcAgentLoop : IDisposable
                 return denied;
             }
 
+            if (session.PendingRunbookApprovalStep is { } pendingRunbookStep)
+            {
+                if (session.ApprovedRunbookStep != pendingRunbookStep)
+                {
+                    session.ApprovedRunbookStep = pendingRunbookStep;
+                    session.ApprovedRunbookRisks.Clear();
+                }
+
+                session.ApprovedRunbookRisks.Add(confirmation.Risk);
+                session.PendingRunbookApprovalStep = null;
+            }
+            else
+            {
+                ClearRunbookApprovals(session);
+            }
+
+            // This is surfaced to the inner controller for the next decision.
+            // Runbook authority is separately bound to the exact retrieved step.
             session.ApprovedRisk = confirmation.Risk;
             session.Confirmation = null;
+            _active = true;
+        }
+
+        try
+        {
+            return ContinueAsync(session).GetAwaiter().GetResult();
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _active = false;
+            }
+        }
+    }
+
+    internal PcRunResult ResumeHandoff(string sessionId, string handoffId, string outerContext)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (string.IsNullOrWhiteSpace(outerContext) ||
+            outerContext.Length > SecurityLimits.MaxAgentOuterContextCharacters ||
+            outerContext.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"outer_context must contain 1 to {SecurityLimits.MaxAgentOuterContextCharacters} printable characters.");
+        }
+
+        RunSession session;
+        lock (_gate)
+        {
+            if (_active)
+            {
+                throw new InvalidOperationException("The Rapid PC Use agent is already active.");
+            }
+
+            session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting outer assistance.");
+            if (session.Confirmation is not null)
+            {
+                throw new InvalidOperationException("The paused run is awaiting confirmation, not outer assistance.");
+            }
+
+            var handoff = session.Handoff ?? throw new InvalidOperationException("The paused run has no handoff request.");
+            if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(handoff.HandoffId, handoffId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The PC agent handoff token does not match the paused run.");
+            }
+
+            if (_timeProvider.GetUtcNow() > handoff.ExpiresUtc)
+            {
+                _paused = null;
+                session.Clear();
+                var expired = CreateResult(
+                    session,
+                    PcAgentStatus.Blocked,
+                    "The outer-assistance handoff expired and the PC task remained stopped.",
+                    null,
+                    null);
+                AgentTelemetry.RunCompleted(
+                    session.RunId,
+                    expired.Status,
+                    session.ModelTurns,
+                    session.ActionsExecuted,
+                    expired.ElapsedMilliseconds,
+                    0,
+                    0);
+                return expired;
+            }
+
+            _paused = null;
+            session.Handoff = null;
+            session.PendingOuterContext = outerContext;
             _active = true;
         }
 
@@ -176,6 +278,53 @@ internal sealed class PcAgentLoop : IDisposable
         try
         {
             Observation? observation = _desktop.ObserveActiveWindow(beginControl: true);
+            if (!session.InitialRetrievalAttempted)
+            {
+                session.InitialRetrievalAttempted = true;
+                try
+                {
+                    var query = session.Request.Task[..Math.Min(
+                        session.Request.Task.Length,
+                        SecurityLimits.MaxAgentRetrievalQueryCharacters)];
+                    var result = _localRoutes.Search(query);
+                    if (result.KnowledgeCount > 0 || result.RunbookCount > 0)
+                    {
+                        RegisterRetrieval(session, result);
+                        session.PendingRetrievedContext = result.Context;
+                        session.LastRetrievedContext = result.Context;
+                    }
+
+                    AgentTelemetry.KnowledgeRetrieved(session.RunId, 0, result);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or JsonException)
+                {
+                    // Local memory must be an optimization, never a reason to destroy a visible task.
+                    AgentTelemetry.KnowledgeRetrievalUnavailable(session.RunId, 0, exception);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.PendingLaunchUri))
+            {
+                AgentTelemetry.ObservationCaptured(session.RunId, session.ModelTurns, "pre_launch", observation);
+                var launchTiming = _launcher.Launch(session.PendingLaunchUri, _desktop.ThrowIfControlLost);
+                session.PendingLaunchUri = "";
+                AgentTelemetry.LaunchCompleted(session.RunId, launchTiming);
+                if (!launchTiming.TargetActivated)
+                {
+                    var detail = launchTiming.TargetFound
+                        ? $"The direct-launch target opened, but protected foreground process '{launchTiming.ForegroundProcess}' prevented activation."
+                        : "The direct-launch target did not expose a visible window within the readiness budget.";
+                    return Complete(
+                        session,
+                        PcAgentStatus.Blocked,
+                        $"{detail} No model turn was sent; remove the foreground obstruction or retry without launch_uri.",
+                        segmentStarted,
+                        null);
+                }
+
+                observation = _desktop.ObserveActiveWindow(beginControl: true);
+            }
+
             AgentTelemetry.ObservationCaptured(session.RunId, session.ModelTurns, "initial", observation);
             if (session.ExpectedTopologyKey is not null)
             {
@@ -185,7 +334,7 @@ internal sealed class PcAgentLoop : IDisposable
                     return Complete(
                         session,
                         PcAgentStatus.Blocked,
-                        "The display layout changed while confirmation was pending, so the PC task remained stopped.",
+                        "The display layout changed while the PC task was paused, so the task remained stopped.",
                         segmentStarted,
                         null);
                 }
@@ -221,7 +370,11 @@ internal sealed class PcAgentLoop : IDisposable
                     session.ModelTurns + 1,
                     session.Request.Limits.MaxActions - session.ActionsExecuted,
                     session.ApprovedRisk,
-                    session.RunId);
+                    session.RunId,
+                    session.PendingOuterContext,
+                    string.IsNullOrWhiteSpace(session.PendingRetrievedContext)
+                        ? session.ActiveRunbookContext
+                        : session.PendingRetrievedContext);
                 var remainingMilliseconds = Math.Max(
                     1,
                     session.Request.Limits.MaxDurationMilliseconds - checked((int)Math.Min(int.MaxValue, activeElapsed)));
@@ -267,15 +420,74 @@ internal sealed class PcAgentLoop : IDisposable
                 var providerCompleted = Stopwatch.GetTimestamp();
                 _desktop.ThrowIfControlLost();
                 session.ModelTurns++;
+                session.PendingOuterContext = "";
+                session.PendingRetrievedContext = "";
                 AgentTelemetry.ProviderCompleted(session.RunId, session.ModelTurns, modelResult);
                 var frameId = current.FrameId;
                 observation = null;
                 _visualMemory.Clear();
 
+                PreserveRunbookApprovalsOnlyForDecision(session, modelResult.Decision);
+
                 switch (modelResult.Decision)
                 {
+                    case RetrieveDecision retrieve:
+                        session.State = retrieve.NextState;
+                        try
+                        {
+                            var result = _localRoutes.Search(retrieve.Query);
+                            RegisterRetrieval(session, result);
+                            session.PendingRetrievedContext = result.Context;
+                            session.LastRetrievedContext = result.Context;
+                            AgentTelemetry.KnowledgeRetrieved(session.RunId, session.ModelTurns, result);
+                        }
+                        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or JsonException)
+                        {
+                            session.PendingRetrievedContext = "Trusted local retrieval is unavailable. Continue from visible evidence or request one bounded outer handoff; do not retry this lookup.";
+                            AgentTelemetry.KnowledgeRetrievalUnavailable(session.RunId, session.ModelTurns, exception);
+                        }
+
+                        observation = current;
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "knowledge_retrieved");
+                        break;
+
+                    case RunbookStepDecision runbookStep:
+                        var runbookRoute = RouteRunbookStep(
+                            session,
+                            modelResult,
+                            runbookStep,
+                            current,
+                            iterationStarted,
+                            providerStarted,
+                            providerCompleted,
+                            segmentStarted);
+                        if (runbookRoute.TerminalResult is not null)
+                        {
+                            return runbookRoute.TerminalResult;
+                        }
+
+                        observation = runbookRoute.Observation;
+                        break;
+
                     case FinishDecision finish:
                         session.State = finish.FinalState;
+                        if (session.PendingRequiredRunbookSteps.Count > 0)
+                        {
+                            session.PendingRetrievedContext = ExecutePendingRunbookVerifiers(
+                                session,
+                                current,
+                                session.ModelTurns,
+                                segmentStarted);
+                            session.AddOutcome(new AgentActionOutcome(
+                                ["finish"],
+                                ScreenChanged: false,
+                                "Verify current task state",
+                                "The driver rejected completion because a retrieved runbook requires an exact read-only verifier."));
+                            observation = current;
+                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "runbook_verification_required");
+                            break;
+                        }
+
                         RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "finished");
                         return Complete(
                             session,
@@ -309,6 +521,11 @@ internal sealed class PcAgentLoop : IDisposable
 
                         RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_requested");
                         return Pause(session, confirmation.Risk, confirmation.OperationSummary, current.TopologyKey, segmentStarted);
+
+                    case HandoffDecision handoff:
+                        session.State = handoff.NextState;
+                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "outer_handoff_requested");
+                        return PauseForHandoff(session, handoff, current.TopologyKey, segmentStarted);
 
                     case ActDecision act:
                         session.State = act.NextState;
@@ -384,7 +601,12 @@ internal sealed class PcAgentLoop : IDisposable
                             break;
                         }
 
-                        session.ActionsExecuted += actResult.Failure?.CompletedActions ?? actionCount;
+                        var completedActionCount = actResult.Failure?.CompletedActions ?? actionCount;
+                        session.ActionsExecuted += completedActionCount;
+                        if (completedActionCount > 0 && HasConsequentialNativeAction(act.Actions, completedActionCount))
+                        {
+                            RearmActiveRunbookVerifiers(session);
+                        }
                         if (policy.ConsumedApprovedRisk)
                         {
                             session.ApprovedRisk = null;
@@ -415,6 +637,28 @@ internal sealed class PcAgentLoop : IDisposable
                             AgentTelemetry.CompletionGuardEvaluated(session.RunId, session.ModelTurns, guardResult);
                             if (guardResult.Matched)
                             {
+                                if (session.PendingRequiredRunbookSteps.Count > 0)
+                                {
+                                    session.PendingRetrievedContext = ExecutePendingRunbookVerifiers(
+                                        session,
+                                        observation,
+                                        session.ModelTurns,
+                                        segmentStarted);
+                                    session.AddOutcome(new AgentActionOutcome(
+                                        ["completion_guard"],
+                                        ScreenChanged: true,
+                                        "Verify current task state",
+                                        "The driver retained control because a retrieved runbook requires an exact read-only verifier."));
+                                    RecordDecisionRoute(
+                                        session,
+                                        modelResult,
+                                        iterationStarted,
+                                        providerStarted,
+                                        providerCompleted,
+                                        "completion_guard_verification_required");
+                                    break;
+                                }
+
                                 RecordDecisionRoute(
                                     session,
                                     modelResult,
@@ -532,6 +776,49 @@ internal sealed class PcAgentLoop : IDisposable
         return result;
     }
 
+    private PcRunResult PauseForHandoff(
+        RunSession session,
+        HandoffDecision decision,
+        string topologyKey,
+        long segmentStarted)
+    {
+        _desktop.ThrowIfControlLost();
+        session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
+        session.Handoff = new PcHandoff(
+            DriverLog.NewOperationId("handoff"),
+            decision.Reason,
+            decision.Request,
+            _timeProvider.GetUtcNow() + SecurityLimits.AgentHandoffLifetime);
+        // A one-shot confirmation is bound to the exact pending action. Never
+        // carry it across an outer-planner boundary where the plan may change.
+        session.ApprovedRisk = null;
+        ClearRunbookApprovals(session);
+        session.ExpectedTopologyKey = topologyKey;
+        _visualMemory.Clear();
+        _desktop.Stop();
+        lock (_gate)
+        {
+            _paused = session;
+        }
+
+        var result = CreateResult(
+            session,
+            PcAgentStatus.NeedsHandoff,
+            "The PC task is waiting for bounded assistance from the outer Codex planner.",
+            null,
+            null,
+            session.Handoff);
+        AgentTelemetry.RunCompleted(
+            session.RunId,
+            result.Status,
+            session.ModelTurns,
+            session.ActionsExecuted,
+            result.ElapsedMilliseconds,
+            0,
+            StateBytes(session.State));
+        return result;
+    }
+
     private PcRunResult Complete(
         RunSession session,
         PcAgentStatus status,
@@ -543,7 +830,25 @@ internal sealed class PcAgentLoop : IDisposable
         session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
         _visualMemory.Clear();
         _desktop.Stop();
+        var routeLearningStarted = Stopwatch.GetTimestamp();
+        try
+        {
+            _localRoutes.RecordPerformance(session.RunbookExecutionSamples);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or JsonException)
+        {
+            // Route history is an optimization and must never change the task result.
+            AgentTelemetry.RouteLearningUnavailable(session.RunId, exception);
+        }
+
+        var routeLearningMicroseconds = ElapsedMicroseconds(routeLearningStarted, Stopwatch.GetTimestamp());
+        session.ActiveElapsedMilliseconds += (long)Math.Ceiling(routeLearningMicroseconds / 1_000d);
+        AgentTelemetry.RouteLearningCompleted(
+            session.RunId,
+            session.RunbookExecutionSamples.Count,
+            routeLearningMicroseconds);
         var result = CreateResult(session, status, summary, null, finalObservation);
+
         session.Clear();
         AgentTelemetry.RunCompleted(
             session.RunId,
@@ -561,7 +866,8 @@ internal sealed class PcAgentLoop : IDisposable
         PcAgentStatus status,
         string summary,
         PcConfirmation? confirmation,
-        Observation? finalObservation)
+        Observation? finalObservation,
+        PcHandoff? handoff = null)
         => new(
             status,
             session.RunId,
@@ -571,6 +877,7 @@ internal sealed class PcAgentLoop : IDisposable
             session.ActiveElapsedMilliseconds,
             session.TelemetrySessionId,
             confirmation,
+            handoff,
             finalObservation);
 
     private void ValidateRequest(PcRunRequest request)
@@ -578,6 +885,18 @@ internal sealed class PcAgentLoop : IDisposable
         if (string.IsNullOrWhiteSpace(request.Task) || request.Task.Length > SecurityLimits.MaxAgentTaskCharacters)
         {
             throw new ArgumentException($"task must contain 1 to {SecurityLimits.MaxAgentTaskCharacters} characters.");
+        }
+
+        if (request.ExecutionContext.Length > SecurityLimits.MaxAgentOuterContextCharacters ||
+            request.ExecutionContext.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"execution_context must contain at most {SecurityLimits.MaxAgentOuterContextCharacters} printable characters.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.LaunchUri))
+        {
+            _ = PcLaunchCoordinator.ValidateUri(request.LaunchUri);
         }
 
         if (request.Scope.AllowedProcesses.Count > SecurityLimits.MaxAgentAllowedProcesses)
@@ -658,7 +977,9 @@ internal sealed class PcAgentLoop : IDisposable
 
     private static string ConfirmationSummary(PcRiskFlag risk) => risk switch
     {
+        PcRiskFlag.LocalProcessLaunch => "Allow the PC agent to launch a trusted local process?",
         PcRiskFlag.ExternalCommunication => "Allow the PC agent to send or submit information externally?",
+        PcRiskFlag.RemoteContentChange => "Allow the PC agent to modify or delete remote content or social state?",
         PcRiskFlag.LocalDeletion => "Allow the PC agent to delete a local item?",
         PcRiskFlag.CredentialEntry => "Allow the PC agent to enter credentials?",
         PcRiskFlag.PurchaseOrFinancial => "Allow the PC agent to perform a purchase or financial action?",
@@ -666,6 +987,22 @@ internal sealed class PcAgentLoop : IDisposable
         PcRiskFlag.DownloadOrInstall => "Allow the PC agent to download or install software?",
         PcRiskFlag.UnclassifiedSensitiveAction => "Allow the PC agent to perform the pending sensitive action?",
         _ => "Allow the pending sensitive action?",
+    };
+
+    private static PcRiskFlag? RequiredRunbookRisk(string effect)
+        => effect == "none"
+            ? null
+            : PcAgentDecisionParser.TryParseRisk(effect, out var risk)
+                ? risk
+                : throw new InvalidOperationException("The trusted runbook step declares an unsupported effect.");
+
+    private static bool ScopeAllowsRisk(PcRunScope scope, PcRiskFlag risk) => risk switch
+    {
+        PcRiskFlag.LocalProcessLaunch => scope.AllowLocalProcessLaunches,
+        PcRiskFlag.ExternalCommunication => scope.AllowExternalCommunication,
+        PcRiskFlag.RemoteContentChange => scope.AllowRemoteContentChanges,
+        PcRiskFlag.LocalDeletion => scope.AllowLocalDeletion,
+        _ => false,
     };
 
     private static string BoundSummary(string summary)
@@ -713,8 +1050,26 @@ internal sealed class PcAgentLoop : IDisposable
         internal int ActionsExecuted { get; set; }
         internal long ActiveElapsedMilliseconds { get; set; }
         internal PcRiskFlag? ApprovedRisk { get; set; }
+        internal PcRunbookStepReference? ApprovedRunbookStep { get; set; }
+        internal PcRunbookStepReference? PendingRunbookApprovalStep { get; set; }
+        internal HashSet<PcRiskFlag> ApprovedRunbookRisks { get; } = [];
         internal PcConfirmation? Confirmation { get; set; }
+        internal PcHandoff? Handoff { get; set; }
+        internal string PendingOuterContext { get; set; } = request.ExecutionContext;
+        internal string PendingRetrievedContext { get; set; } = "";
+        internal string ActiveRunbookContext { get; set; } = "";
+        internal string PendingLaunchUri { get; set; } = request.LaunchUri;
         internal string? ExpectedTopologyKey { get; set; }
+        internal HashSet<string> RetrievedRunbookKeys { get; } = new(StringComparer.Ordinal);
+        internal HashSet<string> ActiveRunbookKeys { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<PcRunbookStepReference, PcRunbookStep> RetrievedRunbookSteps { get; } = [];
+        internal HashSet<PcRunbookStepReference> PendingRequiredRunbookSteps { get; } = [];
+        internal HashSet<PcRunbookStepReference> NonRepeatableRunbookStepAttempts { get; } = [];
+        internal Dictionary<PcRunbookStepReference, int> LastSuccessfulRunbookStepActionCounts { get; } = [];
+        internal Dictionary<PcRunbookStepReference, int> LastFailedRunbookStepActionCounts { get; } = [];
+        internal List<PcRunbookExecutionSample> RunbookExecutionSamples { get; } = [];
+        internal bool InitialRetrievalAttempted { get; set; }
+        internal string LastRetrievedContext { get; set; } = "";
 
         internal void AddOutcome(AgentActionOutcome outcome)
         {
@@ -730,8 +1085,25 @@ internal sealed class PcAgentLoop : IDisposable
             State = AgentWorkingState.Empty;
             RecentOutcomes.Clear();
             ApprovedRisk = null;
+            ApprovedRunbookStep = null;
+            PendingRunbookApprovalStep = null;
+            ApprovedRunbookRisks.Clear();
             Confirmation = null;
+            Handoff = null;
+            PendingOuterContext = "";
+            PendingRetrievedContext = "";
+            ActiveRunbookContext = "";
+            PendingLaunchUri = "";
             ExpectedTopologyKey = null;
+            RetrievedRunbookKeys.Clear();
+            ActiveRunbookKeys.Clear();
+            RetrievedRunbookSteps.Clear();
+            PendingRequiredRunbookSteps.Clear();
+            NonRepeatableRunbookStepAttempts.Clear();
+            LastSuccessfulRunbookStepActionCounts.Clear();
+            LastFailedRunbookStepActionCounts.Clear();
+            RunbookExecutionSamples.Clear();
+            LastRetrievedContext = "";
         }
     }
 }

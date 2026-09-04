@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a focused capability, safety, or performance improvement.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What real workflow or limitation should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: Verification or measurement
+      description: Explain how correctness, safety, or time to task completion could be measured independently.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundaries considered
+      options:
+        - label: I considered physical-Escape takeover and Windows security boundaries.
+        - label: I considered whether a structured CLI, API, connector, or browser route is better than GUI automation.
+        - label: I will not post credentials, private screenshots, message contents, or unredacted logs.
