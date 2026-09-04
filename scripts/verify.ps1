@@ -12,6 +12,7 @@ $securityTestsProject = Join-Path $root 'tests\RapidPcUse.SecurityTests\RapidPcU
 $agentTestsProject = Join-Path $root 'tests\RapidPcUse.AgentTests\RapidPcUse.AgentTests.csproj'
 $benchmarkTests = Join-Path $root 'tests\BenchmarkSupport.Tests.ps1'
 $realWorldBenchmarkTests = Join-Path $root 'tests\RealWorldBenchmark.Tests.ps1'
+$pluginRoutingTests = Join-Path $root 'tests\PluginRouting.Tests.ps1'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
@@ -69,6 +70,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $benchmarkTests
 & $realWorldBenchmarkTests
+& $pluginRoutingTests
 
 $parseErrors = @()
 $scriptFiles = @(

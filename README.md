@@ -1,5 +1,9 @@
 # Rapid PC Use
 
+[![CI](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/ci.yml/badge.svg)](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/codeql.yml/badge.svg)](https://github.com/tntcannon5000/rapid-pc-use/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 Rapid PC Use is a clean-room, speed-first Windows computer-use driver for Codex and ChatGPT desktop. It gives the model the real Windows cursor and keyboard, one image per display, batched native actions, and physical-Escape takeover.
 
 This repository is a **public beta**. The capture backend is still GDI-based and the Windows executable is not Authenticode-signed. Use it only on a desktop where you can safely take over with the physical Escape key.
@@ -30,6 +34,12 @@ The locally built public-beta executable is not Authenticode-signed, so install 
 Press the physical **Escape** key at any time to cancel the current driver action, release held input, hide the overlay, and return control to yourself.
 
 For a trusted, dedicated test machine only, `-EnableFastMode` is an explicit opt-in that disables per-call tool prompts. The default and recommended mode is prompted approval.
+
+## When Rapid PC Use runs
+
+The Codex skill is available for implicit selection, but it is deliberately scoped to work that requires visible Windows GUI state. Codex should continue to use direct shell commands, filesystem tools, APIs, connectors, and structured browser automation when those routes can complete and verify the task without meaningful tradeoffs. In particular, Rapid PC Use should not be invoked merely to type commands into an open terminal.
+
+Hybrid workflows are encouraged: a trusted direct command can inspect state or launch an application, then Rapid PC Use can take over only for the visual portion. When visual desktop control is actually required, the installed guidance prefers Rapid PC Use over built-in Computer Use.
 
 ## Hot path
 
@@ -130,6 +140,8 @@ Before committing, run the complete build, formatting, metadata, security-test, 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for change guidelines and [`docs/RELEASING.md`](./docs/RELEASING.md) for the maintainer release checklist.
 
 Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, knowledge retrieval, runbook dispatch/readiness, terminal route-learning persistence, decision routing, token/cache counters, progress signals, and aggregate run timing. `scripts/profile.ps1` projects local retrieval, runbook execution, and terminal route learning as separate totals. Messages, task text, model prose, state text, retrieved content, runbook keys/targets/results, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-04
+
+- Enable precise implicit skill routing for genuinely visual Windows tasks while keeping shell, API, connector, filesystem, and structured-browser work on their faster native paths.
+- Allow hybrid workflows to use deterministic inspection and launch steps before handing only the visual remainder to Rapid PC Use.
 - Add driver-local semantic retrieval, structured trusted runbooks, exact local process launches, fixed direct-process commands with stored arguments and bounded output, fixed loopback app-interface steps with declared effect authority, driver-enforced read-only finish verifiers, and route profiling inside the fast PC loop.
 - Learn privacy-safe per-step reliability and latency after terminal runs and use it to rank equally relevant trusted routes without persisting task text, output, paths, or arguments.
 - Bind learned performance to an execution fingerprint, bound terminal learning lock waits, and isolate fixed commands with closed stdin, a minimal non-secret environment, and kill-on-close descendant containment.
