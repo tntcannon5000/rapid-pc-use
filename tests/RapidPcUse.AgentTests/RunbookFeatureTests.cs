@@ -598,7 +598,9 @@ internal static class RunbookFeatureTests
                         Path.GetDirectoryName(command)!,
                         "",
                         Arguments: ["/R", Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"],
-                        TimeoutMilliseconds: 3_000),
+                        // The recursive Windows system-directory query is intentionally read-only,
+                        // but cold hosted runners can exceed three seconds under antivirus load.
+                        TimeoutMilliseconds: 10_000),
                 ],
                 "manual",
                 100);
