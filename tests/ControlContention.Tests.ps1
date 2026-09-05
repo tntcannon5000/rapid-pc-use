@@ -78,6 +78,13 @@ try {
         arguments = @{ begin_control = $true; capture_scope = 'active_window' }
     }
     Assert-Test ($ownerObservation.result.isError -ne $true) 'The first driver could not acquire desktop control.'
+    $ownerStatus = [string]$ownerObservation.result.structuredContent.status
+    if ($ownerStatus -eq 'blocked' -and
+        [string]$ownerObservation.result.structuredContent.code -eq 'desktop_input_blocked') {
+        $nativeError = [string]$ownerObservation.result.structuredContent.native_error_code
+        throw "Cross-host contention requires a writable interactive desktop, but Windows blocked synthetic input before the owner acquired the lease (desktop_input_blocked, native_error_code=$nativeError)."
+    }
+    Assert-Test ($ownerStatus -eq 'observing') "The first driver returned unexpected status '$ownerStatus' instead of acquiring desktop control."
 
     $blocked = Invoke-TestMcp -Process $contender -Id 2 -Method 'tools/call' -Params @{
         name = 'pc_observe'
