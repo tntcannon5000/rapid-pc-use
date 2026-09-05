@@ -9,6 +9,7 @@ internal static class ProviderFactory
             "openai" => new OpenAiResponsesProvider(
                 Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "",
                 options),
+            "broker" => new BrokeredModelProvider(options),
             _ => throw new InvalidOperationException("The configured PC agent provider is not registered."),
         };
 }

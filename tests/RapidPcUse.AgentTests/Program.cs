@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -50,6 +51,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("OpenAI requests are stateless and current-frame only", OpenAiRequestIsBounded),
     ("OpenAI requests apply the configured service tier", OpenAiRequestUsesConfiguredServiceTier),
     ("OpenAI streaming returns one strict decision", OpenAiStreamingDecisionParses),
+    ("broker provider authenticates one bounded structured decision", BrokerProviderReturnsStructuredDecision),
+    ("broker provider rejects a mismatched response identity", BrokerProviderRejectsMismatchedIdentity),
     ("provider failures do not expose response bodies", ProviderFailureIsRedacted),
     ("truncated provider streams fail closed", TruncatedProviderStreamFailsClosed),
     ("agent loop completes through replay provider", ReplayLoopCompletes),
@@ -273,6 +276,117 @@ static async Task OpenAiStreamingDecisionParses()
     Assert(result.Decision is FinishDecision { Summary: "Done" }, "finish decision was not parsed");
     Assert(result.Usage.InputTokens == 1200 && result.Usage.CachedInputTokens == 1024, "usage counters were not parsed");
     Assert(handler.RequestPayload is not null, "request payload was not captured");
+}
+
+static async Task BrokerProviderReturnsStructuredDecision()
+{
+    var pipeName = $"rapid-pc-use-test-{Guid.NewGuid():N}";
+    var token = new string('a', 64);
+    using var server = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    var serverTask = Task.Run(async () =>
+    {
+        await server.WaitForConnectionAsync();
+        using var reader = new StreamReader(server, new UTF8Encoding(false), leaveOpen: true);
+        using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        var line = await reader.ReadLineAsync() ?? throw new InvalidOperationException("Missing broker request.");
+        using var request = JsonDocument.Parse(line);
+        var root = request.RootElement;
+        Assert(root.GetProperty("protocolVersion").GetInt32() == 1, "broker protocol version should be explicit");
+        Assert(root.GetProperty("token").GetString() == token, "broker token should authenticate the request");
+        Assert(root.GetProperty("images").GetArrayLength() == 1, "broker request should contain only current images");
+        Assert(root.GetProperty("decisionSchema").GetProperty("additionalProperties").GetBoolean() == false,
+            "broker should carry the closed structured decision schema");
+        var requestId = root.GetProperty("requestId").GetString();
+        var response = JsonSerializer.Serialize(new
+        {
+            protocolVersion = 1,
+            requestId,
+            ok = true,
+            functionName = "computer_decide",
+            arguments = "{\"decision\":\"finish\",\"summary\":\"Done.\",\"memory\":\"\",\"visible_evidence\":\"Fixture complete.\"}",
+            provider = "codex",
+            model = "gpt-5.6-sol",
+            timings = new
+            {
+                attachmentMicroseconds = 10,
+                prepareMicroseconds = 20,
+                firstEventMicroseconds = 30,
+                firstDecisionMicroseconds = 40,
+                decisionCompleteMicroseconds = 50,
+            },
+            usage = new
+            {
+                inputTokens = 100,
+                cachedInputTokens = 80,
+                outputTokens = 20,
+                reasoningTokens = 5,
+            },
+        });
+        await writer.WriteLineAsync(response);
+    });
+
+    using var provider = new BrokeredModelProvider(Options() with
+    {
+        Provider = "broker",
+        Model = "gpt-5.6-sol",
+    }, pipeName, token);
+    var result = await provider.DecideAsync(
+        new PcModelTurnRequest(
+            "Complete fixture.",
+            Scope(),
+            AgentWorkingState.Empty,
+            [],
+            Observation(1, [1, 2, 3]),
+            1,
+            10,
+            null,
+            "broker-test"),
+        CancellationToken.None);
+    await serverTask;
+
+    Assert(result.Decision is FinishDecision, "broker response should parse through the shared decision parser");
+    Assert(result.Provider == "codex" && result.Model == "gpt-5.6-sol",
+        "broker should preserve the exact DSH provider route");
+    Assert(result.Usage.CachedInputTokens == 80, "broker should preserve cache usage telemetry");
+    Assert(result.LocalTimings.ImageStageMicroseconds == 10, "broker should preserve attachment timing");
+}
+
+static async Task BrokerProviderRejectsMismatchedIdentity()
+{
+    var pipeName = $"rapid-pc-use-test-{Guid.NewGuid():N}";
+    var token = new string('b', 64);
+    using var server = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    var serverTask = Task.Run(async () =>
+    {
+        await server.WaitForConnectionAsync();
+        using var reader = new StreamReader(server, new UTF8Encoding(false), leaveOpen: true);
+        using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        _ = await reader.ReadLineAsync();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            protocolVersion = 1,
+            requestId = "wrong-request",
+            ok = false,
+            errorCode = "fixture",
+        }));
+    });
+
+    using var provider = new BrokeredModelProvider(Options() with { Provider = "broker" }, pipeName, token);
+    await ExpectAsync<InvalidOperationException>(() => provider.DecideAsync(
+        new PcModelTurnRequest(
+            "Complete fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+        CancellationToken.None));
+    await serverTask;
 }
 
 static async Task ProviderFailureIsRedacted()
@@ -590,7 +704,9 @@ static Task McpKnowledgeUpdateSchemaMatchesHandler()
     var update = response.RootElement.GetProperty("result").GetProperty("tools")
         .EnumerateArray()
         .Single(tool => tool.GetProperty("name").GetString() == "pc_knowledge_update");
-    var variants = update.GetProperty("inputSchema").GetProperty("oneOf").EnumerateArray().ToArray();
+    var inputSchema = update.GetProperty("inputSchema");
+    Assert(inputSchema.GetProperty("type").GetString() == "object", "knowledge update schema is not an MCP-compatible object root");
+    var variants = inputSchema.GetProperty("oneOf").EnumerateArray().ToArray();
     Assert(variants.Length == 2, "knowledge update schema did not publish two operation variants");
     var upsert = variants.Single(variant =>
         variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "upsert");

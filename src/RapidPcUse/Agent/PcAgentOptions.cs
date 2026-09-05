@@ -27,7 +27,7 @@ internal sealed record PcAgentOptions(
         var imageDetail = ReadEnum("RAPID_PC_AGENT_IMAGE_DETAIL", "original", "auto", "low", "high", "original");
         var hasOpenAiKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENAI_API_KEY"));
         var enabled = ReadOptionalBoolean("RAPID_PC_AGENT_ENABLED") ??
-            (provider == "codex" || provider == "openai" && hasOpenAiKey);
+            (provider is "codex" or "broker" || provider == "openai" && hasOpenAiKey);
 
         return new PcAgentOptions(
             enabled,
