@@ -38,9 +38,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 [IO.Directory]::CreateDirectory((Split-Path $OutputPath -Parent)) | Out-Null
 
-if ($FixtureId -eq 'click-ladder-v1') {
-    Add-Type -AssemblyName UIAutomationClient
-}
+Add-Type -AssemblyName UIAutomationClient
 
 function Invoke-Mcp {
     param(
@@ -65,7 +63,20 @@ function Invoke-Mcp {
     if ($null -ne $response.error) {
         throw "MCP method '$Method' failed with JSON-RPC code $($response.error.code): $($response.error.message)"
     }
+    if ($response.result.isError -eq $true) {
+        $summary = [string](($response.result.content | Where-Object type -eq 'text' | Select-Object -First 1).text)
+        throw "MCP method '$Method' returned a terminal tool failure: $summary"
+    }
     return $response
+}
+
+function Assert-McpActionCompleted([object]$Response, [string]$Phase) {
+    if ($Response.result.structuredContent.status -eq 'action_interrupted') {
+        $failureCode = [string]$Response.result.structuredContent.failure_code
+        $nativeError = $Response.result.structuredContent.native_error_code
+        $inBounds = $Response.result.structuredContent.target_within_virtual_desktop
+        throw "The $Phase action was interrupted with safe code '$failureCode' (native error: $nativeError; target in bounds: $inBounds)."
+    }
 }
 
 function Get-FrameManifest([object]$Response) {
@@ -123,6 +134,54 @@ function Convert-ScreenPointToAction([double]$X, [double]$Y, [object]$Manifest) 
     throw "Fixture point ($X, $Y) is outside the observed displays."
 }
 
+function Assert-FixtureHasFocus([Diagnostics.Process]$FixtureProcess) {
+    $focused = [Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused -or $focused.Current.ProcessId -ne $FixtureProcess.Id) {
+        throw 'The performance fixture lost foreground focus; refusing to inject the action batch.'
+    }
+}
+
+function Get-FixtureTarget {
+    param(
+        [Parameter(Mandatory)]
+        [Diagnostics.Process]$FixtureProcess,
+        [Parameter(Mandatory)]
+        [ValidateSet('initial', 'sequence')]
+        [string]$Purpose
+    )
+
+    $rootElement = [Windows.Automation.AutomationElement]::FromHandle($FixtureProcess.MainWindowHandle)
+    if ($FixtureId -eq 'form-tab-v1') {
+        $condition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Edit)
+        return $rootElement.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+    }
+    if ($Purpose -eq 'initial') {
+        $condition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Button)
+        $buttons = $rootElement.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+        foreach ($button in $buttons) {
+            if ($button.Current.Name -eq '5' -or $button.Current.Name -eq 'Tile 5') {
+                return $button
+            }
+        }
+    }
+    return $rootElement
+}
+
+function Convert-ElementToAction([Windows.Automation.AutomationElement]$Element, [object]$Manifest) {
+    if ($null -eq $Element) {
+        throw 'The performance fixture did not expose its expected activation target.'
+    }
+    $rectangle = $Element.Current.BoundingRectangle
+    return Convert-ScreenPointToAction `
+        ($rectangle.Left + ($rectangle.Width / 2)) `
+        ($rectangle.Top + ($rectangle.Height / 2)) `
+        $Manifest
+}
+
 function New-FixtureActions([object]$Manifest) {
     if ($FixtureId -eq 'form-tab-v1') {
         return @(
@@ -142,7 +201,7 @@ function New-FixtureActions([object]$Manifest) {
 
     $fixtureProcess = Get-FixtureProcess
     $rootElement = [Windows.Automation.AutomationElement]::FromHandle($fixtureProcess.MainWindowHandle)
-    $sequence = @(5, 12, 2, 15, 8, 1, 14, 4, 10, 7, 16, 3, 11, 6, 13, 9)
+    $sequence = @(12, 2, 15, 8, 1, 14, 4, 10, 7, 16, 3, 11, 6, 13, 9)
     $buttonCondition = [Windows.Automation.PropertyCondition]::new(
         [Windows.Automation.AutomationElement]::ControlTypeProperty,
         [Windows.Automation.ControlType]::Button)
@@ -220,15 +279,36 @@ try {
         $repetition = $runNumber - $WarmupRuns
         $fixtureRepetition = [Math]::Max(1, $repetition)
         & $fixtureScript -Phase Reset -FixtureId $FixtureId -RunNumber $runNumber -Repetition $fixtureRepetition `
-            -Model 'local-actuator' -Reasoning 'none' -CaptureTier $CaptureTier
+            -Model 'local-actuator' -Reasoning 'none' -CaptureTier $CaptureTier -AllowBackground
+        $fixtureProcess = Get-FixtureProcess
         $runToken = "bench-$FixtureId-$runNumber"
         $wall = [Diagnostics.Stopwatch]::StartNew()
+        $activationObserve = Invoke-Mcp $requestId 'tools/call' @{
+            name = 'pc_observe'
+            arguments = @{ begin_control = $true; capture_scope = 'full_desktop' }
+        } $process
+        $requestId++
+        $activationManifest = Get-FrameManifest $activationObserve
+        $activationTarget = Get-FixtureTarget -FixtureProcess $fixtureProcess -Purpose initial
+        $activation = Invoke-Mcp $requestId 'tools/call' @{
+                name = 'pc_act'
+                arguments = @{
+                    frame_id = [long]$activationManifest.frame_id
+                    actions = @((Convert-ElementToAction $activationTarget $activationManifest))
+                    settle_ms = 0
+                    observe_after = $false
+                }
+            } $process
+        $requestId++
+        Assert-McpActionCompleted $activation 'fixture activation'
+        Assert-FixtureHasFocus $fixtureProcess
         $observe = Invoke-Mcp $requestId 'tools/call' @{
             name = 'pc_observe'
             arguments = @{ begin_control = $true; capture_scope = $CaptureScope }
         } $process
         $requestId++
         $observedManifest = Get-FrameManifest $observe
+        Assert-FixtureHasFocus $fixtureProcess
         $preparationStartedMs = $wall.Elapsed.TotalMilliseconds
         $actions = New-FixtureActions $observedManifest
         $actionPreparationMs = $wall.Elapsed.TotalMilliseconds - $preparationStartedMs
@@ -243,6 +323,7 @@ try {
             }
         } $process
         $requestId++
+        Assert-McpActionCompleted $act 'main fixture'
         $actResponseWallMs = $wall.Elapsed.TotalMilliseconds
         $actedManifest = Get-FrameManifest $act
         $completion = Wait-FixtureCompletion $runToken $wall
@@ -312,11 +393,12 @@ if (Test-Path -LiteralPath $logPath -PathType Leaf) {
         }
     }
 }
-if ($actLogs.Count -ne ($rows.Count + $WarmupRuns)) {
-    throw "Expected $($rows.Count + $WarmupRuns) flushed pc_act telemetry records, found $($actLogs.Count)."
+$mainActLogs = @($actLogs | Where-Object { [int]$_.data.request.action_count -gt 1 })
+if ($mainActLogs.Count -ne ($rows.Count + $WarmupRuns)) {
+    throw "Expected $($rows.Count + $WarmupRuns) flushed main pc_act telemetry records, found $($mainActLogs.Count)."
 }
 for ($index = 0; $index -lt $rows.Count; $index++) {
-    $log = $actLogs[$index + $WarmupRuns]
+    $log = $mainActLogs[$index + $WarmupRuns]
     $rows[$index].ActionExecutionMs = [Math]::Round([double]$log.data.result.action_execution_us / 1000, 3)
     $rows[$index].SettleElapsedMs = [Math]::Round([double]$log.data.result.settle_elapsed_us / 1000, 3)
 }

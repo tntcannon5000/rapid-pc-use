@@ -18,10 +18,12 @@ param(
     [string]$Reasoning,
     [Parameter(Mandatory)]
     [ValidateSet('720', '900')]
-    [string]$CaptureTier
+    [string]$CaptureTier,
+    [switch]$AllowBackground
 )
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $executable = Join-Path $root 'tools\PerformanceFixture\bin\win-x64\rapid-pc-performance-fixture.exe'
 $stateDirectory = Join-Path $env:LOCALAPPDATA 'RapidPcUse\PerformanceFixture'
@@ -73,6 +75,45 @@ function Write-VerificationResult {
     } | ConvertTo-Json -Compress
 }
 
+function Set-PerformanceFixtureFocus {
+    param(
+        [Parameter(Mandatory)]
+        [Diagnostics.Process]$Process,
+        [Parameter(Mandatory)]
+        [string]$Fixture
+    )
+
+    $rootElement = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+    if ($Fixture -eq 'form-tab-v1') {
+        $condition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Edit)
+        $target = $rootElement.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+    }
+    else {
+        $condition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Button)
+        $target = $rootElement.FindAll([Windows.Automation.TreeScope]::Descendants, $condition) |
+            Where-Object { $_.Current.Name -eq '5' -or $_.Current.Name -eq 'Tile 5' } |
+            Select-Object -First 1
+    }
+    if ($null -eq $target) {
+        throw 'The performance fixture did not expose its expected initial focus target.'
+    }
+    $target.SetFocus()
+
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(500)
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        $focused = [Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -ne $focused -and $focused.Current.ProcessId -eq $Process.Id) {
+            return
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    throw 'The performance fixture did not retain keyboard focus.'
+}
+
 if ($Phase -eq 'Reset') {
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw "Build the performance fixture before benchmarking: $executable"
@@ -94,19 +135,31 @@ if ($Phase -eq 'Reset') {
             throw "The performance fixture exited during reset with code $($fixtureProcess.ExitCode)."
         }
         if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+            $state = $null
             try {
                 $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
-                if ($state.fixtureId -eq $FixtureId -and $state.runToken -eq $runToken -and $state.status -eq 'ready') {
-                    $shell = New-Object -ComObject WScript.Shell
-                    if (-not $shell.AppActivate($fixtureProcess.Id)) {
-                        throw 'The performance fixture window could not be activated.'
-                    }
-                    Start-Sleep -Milliseconds 100
-                    return
-                }
             }
             catch {
                 # The fixture may be between its atomic temporary write and move.
+            }
+            if ($null -ne $state -and
+                $state.fixtureId -eq $FixtureId -and
+                $state.runToken -eq $runToken -and
+                $state.status -eq 'ready') {
+                $shell = New-Object -ComObject WScript.Shell
+                if (-not $shell.AppActivate($fixtureProcess.Id) -and -not $AllowBackground) {
+                    throw 'The performance fixture window could not be activated.'
+                }
+                try {
+                    Set-PerformanceFixtureFocus -Process $fixtureProcess -Fixture $FixtureId
+                }
+                catch {
+                    if (-not $AllowBackground) {
+                        throw
+                    }
+                }
+                Start-Sleep -Milliseconds 100
+                return
             }
         }
 

@@ -68,11 +68,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
+    ("MCP pc_act preserves recoverable partial-action interruption", McpActInterruptionIsRecoverable),
     ("agent loop corrects a rejected action without releasing control", AgentLoopCorrectsRejectedAction),
     ("stale frames refresh without terminating low-level control", StaleFrameRefreshes),
     ("provider faults retry inside the high-level loop", ProviderFaultRetries),
     ("provider exhaustion reports a completed direct launch", ProviderExhaustionReportsCompletedLaunch),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
+    ("repeated native pointer suppression blocks without wasting model turns", RepeatedPointerSuppressionBlocks),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
     ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
     ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
@@ -739,6 +741,29 @@ static Task McpActValidationIsRecoverable()
     return Task.CompletedTask;
 }
 
+static Task McpActInterruptionIsRecoverable()
+{
+    using var desktop = new FakeDesktop([Observation(2, [2])]);
+    desktop.InterruptNextAct(completedActions: 0);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_act\",\"arguments\":{\"frame_id\":1,\"actions\":[{\"type\":\"wait\",\"ms\":0}],\"observe_after\":false}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, null, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    var structured = result.GetProperty("structuredContent");
+    Assert(!result.GetProperty("isError").GetBoolean(), "partial action interruption became a terminal MCP error");
+    Assert(structured.GetProperty("status").GetString() == "action_interrupted", "partial action interruption lost its recoverable status");
+    Assert(structured.GetProperty("completed_actions").GetInt32() == 0, "partial action interruption reported an incorrect completed prefix");
+    Assert(structured.GetProperty("failure_code").GetString() == "native_action_failed", "partial action interruption omitted its bounded failure code");
+    Assert(structured.GetProperty("control_active").GetBoolean(), "partial action interruption released control");
+    Assert(structured.GetProperty("frame_id").GetInt64() == 2, "partial action interruption omitted its fresh frame");
+    Assert(result.GetProperty("content").EnumerateArray().Any(item => item.GetProperty("type").GetString() == "image"),
+        "partial action interruption omitted its recovery screenshot");
+    Assert(desktop.StopCount == 0, "partial action interruption invoked failure cleanup");
+    return Task.CompletedTask;
+}
+
 static Task ScrollSchemasUseSharedLimits()
 {
     using var desktop = new FakeDesktop([]);
@@ -956,6 +981,28 @@ static Task PartialExecutionRecovers()
     var result = loop.Run(Request(maxNoProgress: 3));
     Assert(result.Status == PcAgentStatus.Completed, "partial execution did not replan");
     Assert(result.ActionsExecuted == 1, "completed prefix was not counted exactly once");
+    return Task.CompletedTask;
+}
+
+static Task RepeatedPointerSuppressionBlocks()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-0\",\"x\":500,\"y\":500}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Should not be reached.", state, "Target active"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "pointer_move_failed");
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "pointer_move_failed");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var result = loop.Run(Request(maxNoProgress: 3));
+    Assert(result.Status == PcAgentStatus.Blocked, "repeated pointer suppression did not block safely");
+    Assert(result.ModelTurns == 2, "repeated pointer suppression wasted additional model turns");
+    Assert(result.ActionsExecuted == 0, "suppressed pointer actions were counted as executed");
+    Assert(result.Summary.Contains("pointer movement", StringComparison.Ordinal), "pointer suppression returned an unactionable summary");
     return Task.CompletedTask;
 }
 
@@ -1262,7 +1309,7 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
     private CancellationTokenSource _control = new();
     private bool _takeover;
     private bool _staleNextAct;
-    private int? _partialCompletedActions;
+    private readonly Queue<(int CompletedActions, string FailureCode)> _partialFailures = new();
 
     internal List<JsonElement> ActionBatches { get; } = [];
     internal int StopCount { get; private set; }
@@ -1305,15 +1352,15 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
             .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null, null))
             .ToArray();
         var observation = _observations.Count == 0 ? null : _observations.Dequeue();
-        if (_partialCompletedActions is int completedActions)
+        if (_partialFailures.Count > 0)
         {
-            _partialCompletedActions = null;
+            var (completedActions, failureCode) = _partialFailures.Dequeue();
             return new DesktopActResult(
                 observation,
                 timing.Take(completedActions).ToArray(),
                 settleMilliseconds,
                 0,
-                new DesktopActionFailure(completedActions + 1, "wait", "Fixture action was interrupted.", completedActions));
+                new DesktopActionFailure(completedActions + 1, "wait", "Fixture action was interrupted.", completedActions, failureCode));
         }
 
         return new DesktopActResult(observation, timing, settleMilliseconds, 0);
@@ -1346,7 +1393,8 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
 
     internal void FailNextActAsStale() => _staleNextAct = true;
 
-    internal void InterruptNextAct(int completedActions) => _partialCompletedActions = completedActions;
+    internal void InterruptNextAct(int completedActions, string failureCode = "native_action_failed")
+        => _partialFailures.Enqueue((completedActions, failureCode));
 
     public void Dispose() => _control.Dispose();
 }

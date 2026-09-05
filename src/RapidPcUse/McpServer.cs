@@ -640,6 +640,9 @@ internal sealed class McpServer(
             ["action_index"] = failure.ActionIndex,
             ["action_type"] = failure.ActionType,
             ["completed_actions"] = failure.CompletedActions,
+            ["failure_code"] = failure.FailureCode,
+            ["native_error_code"] = failure.NativeErrorCode,
+            ["target_within_virtual_desktop"] = failure.TargetWithinVirtualDesktop,
             ["control_active"] = result.Observation?.ControlActive ?? true,
             ["frame_id"] = result.Observation?.FrameId,
         };
@@ -665,6 +668,9 @@ internal sealed class McpServer(
         settle_elapsed_us = result.SettleElapsedMicroseconds,
         interrupted = result.Failure is not null,
         completed_actions = result.Failure?.CompletedActions,
+        failure_code = result.Failure?.FailureCode,
+        native_error_code = result.Failure?.NativeErrorCode,
+        target_within_virtual_desktop = result.Failure?.TargetWithinVirtualDesktop,
         observation = observationData,
     };
 
@@ -1534,7 +1540,7 @@ internal sealed class McpServer(
 
     private static Dictionary<string, object?> ToolText(string text, bool isError) => new()
     {
-        ["content"] = new object[]
+        ["content"] = new List<object>
         {
             new Dictionary<string, object?> { ["type"] = "text", ["text"] = text },
         },

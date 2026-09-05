@@ -619,16 +619,29 @@ internal sealed partial class PcAgentLoop : IDisposable
                         observation = actResult.Observation ?? throw new InvalidOperationException("The agent action did not return a fresh observation.");
                         if (actResult.Failure is not null)
                         {
+                            var failureProgress = progress.Evaluate(observation, act.Actions);
+                            var repeatedNativeFailures = session.RegisterNativeFailure(actResult.Failure.FailureCode);
                             AgentTelemetry.Recovery(session.RunId, session.ModelTurns, "native_action", 1);
                             session.AddOutcome(new AgentActionOutcome(
                                 ActionTypes(act.Actions),
-                                ScreenChanged: true,
+                                failureProgress.ScreenChanged,
                                 act.ExpectedChange,
-                                $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Continue from the current screenshot using a different approach."));
+                                $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Driver code: {actResult.Failure.FailureCode}. Continue from the current screenshot using a different approach."));
                             RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_interrupted");
+                            if (actResult.Failure.FailureCode == "pointer_move_failed" && repeatedNativeFailures >= 2)
+                            {
+                                return Complete(
+                                    session,
+                                    PcAgentStatus.Blocked,
+                                    "Windows suppressed native pointer movement twice. No further click was attempted; use a keyboard-only route or restore synthetic pointer input before retrying.",
+                                    segmentStarted,
+                                    session.Request.ReturnFinalScreenshot ? observation : null);
+                            }
+
                             break;
                         }
 
+                        session.ResetNativeFailures();
                         var progressResult = progress.Evaluate(observation, act.Actions);
                         session.AddOutcome(new AgentActionOutcome(
                             ActionTypes(act.Actions),
@@ -1089,6 +1102,8 @@ internal sealed partial class PcAgentLoop : IDisposable
         internal bool InitialRetrievalAttempted { get; set; }
         internal bool DirectLaunchCompleted { get; set; }
         internal string LastRetrievedContext { get; set; } = "";
+        internal string LastNativeFailureCode { get; set; } = "";
+        internal int ConsecutiveNativeFailures { get; set; }
 
         internal void AddOutcome(AgentActionOutcome outcome)
         {
@@ -1097,6 +1112,21 @@ internal sealed partial class PcAgentLoop : IDisposable
             {
                 RecentOutcomes.RemoveAt(0);
             }
+        }
+
+        internal int RegisterNativeFailure(string code)
+        {
+            ConsecutiveNativeFailures = string.Equals(LastNativeFailureCode, code, StringComparison.Ordinal)
+                ? ConsecutiveNativeFailures + 1
+                : 1;
+            LastNativeFailureCode = code;
+            return ConsecutiveNativeFailures;
+        }
+
+        internal void ResetNativeFailures()
+        {
+            LastNativeFailureCode = "";
+            ConsecutiveNativeFailures = 0;
         }
 
         internal void Clear()
@@ -1124,6 +1154,7 @@ internal sealed partial class PcAgentLoop : IDisposable
             RunbookExecutionSamples.Clear();
             DirectLaunchCompleted = false;
             LastRetrievedContext = "";
+            ResetNativeFailures();
         }
     }
 }

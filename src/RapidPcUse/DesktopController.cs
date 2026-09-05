@@ -105,7 +105,10 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     actionIndex + 1,
                     actionType,
                     wrapped.Message,
-                    actionIndex);
+                    actionIndex,
+                    ActionFailureCode(exception),
+                    ActionFailureNativeError(exception),
+                    ActionFailureTargetInBounds(exception));
                 _input.ReleaseAll();
                 break;
             }
@@ -724,6 +727,51 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             "wait" => $"wait {SafeInteger(action, "ms")?.ToString() ?? "?"} ms",
             _ => "desktop action",
         };
+    }
+
+    private static string ActionFailureCode(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NativeInputStageException stage)
+            {
+                return stage.Stage switch
+                {
+                    "pointer_move" => "pointer_move_failed",
+                    "button_down" => "button_down_failed",
+                    "button_up" => "button_up_failed",
+                    _ => "native_action_failed",
+                };
+            }
+        }
+
+        return "native_action_failed";
+    }
+
+    private static int? ActionFailureNativeError(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is System.ComponentModel.Win32Exception win32)
+            {
+                return win32.NativeErrorCode;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool? ActionFailureTargetInBounds(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Data["target_within_virtual_desktop"] is bool value)
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private static string? SafeString(JsonElement value, string property)

@@ -69,7 +69,8 @@ internal sealed class PerformanceFixtureForm : Form
     private readonly Label _status = new();
     private readonly Dictionary<string, TextBox> _fields = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _readyAt = DateTimeOffset.UtcNow;
-    private readonly System.Windows.Forms.Timer _foregroundTimer = new() { Interval = 250 };
+    private readonly System.Windows.Forms.Timer _foregroundTimer = new() { Interval = 50 };
+    private int _foregroundAttempts;
     private int _clickIndex;
     private int _usefulActions;
     private int _incorrectActions;
@@ -93,18 +94,43 @@ internal sealed class PerformanceFixtureForm : Form
         Controls.Add(options.FixtureId == "click-ladder-v1" ? BuildClickLadder() : BuildFormFixture());
         _foregroundTimer.Tick += (_, _) =>
         {
-            TopMost = false;
-            _foregroundTimer.Stop();
-            _foregroundTimer.Dispose();
+            _foregroundAttempts++;
+            if (TryActivateWindow(Handle))
+            {
+                FocusInitialControl();
+                StopForegroundReadinessLoop();
+            }
+            else if (_foregroundAttempts >= 20)
+            {
+                StopForegroundReadinessLoop();
+            }
         };
         Shown += (_, _) =>
         {
             TopMost = true;
             WriteState();
             Activate();
-            _ = SetForegroundWindow(Handle);
+            if (TryActivateWindow(Handle))
+            {
+                FocusInitialControl();
+            }
             _foregroundTimer.Start();
         };
+    }
+
+    private void FocusInitialControl()
+    {
+        if (_options.FixtureId == "form-tab-v1" && _fields.TryGetValue("First name", out var firstName))
+        {
+            _ = firstName.Focus();
+        }
+    }
+
+    private void StopForegroundReadinessLoop()
+    {
+        TopMost = false;
+        _foregroundTimer.Stop();
+        _foregroundTimer.Dispose();
     }
 
     private TableLayoutPanel BuildClickLadder()
@@ -379,7 +405,78 @@ internal sealed class PerformanceFixtureForm : Form
         File.Move(temporary, path, true);
     }
 
+    private static bool TryActivateWindow(nint target)
+    {
+        if (GetForegroundWindow() == target)
+        {
+            return true;
+        }
+
+        _ = SetForegroundWindow(target);
+        if (GetForegroundWindow() == target)
+        {
+            return true;
+        }
+
+        var currentThread = GetCurrentThreadId();
+        var foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        var targetThread = GetWindowThreadProcessId(target, out _);
+        var attachedForeground = AttachInputThread(currentThread, foregroundThread);
+        var attachedTarget = AttachInputThread(currentThread, targetThread);
+        try
+        {
+            _ = BringWindowToTop(target);
+            _ = SetActiveWindow(target);
+            _ = SetForegroundWindow(target);
+            if (GetForegroundWindow() != target)
+            {
+                SwitchToThisWindow(target, true);
+            }
+
+            return GetForegroundWindow() == target;
+        }
+        finally
+        {
+            if (attachedTarget)
+            {
+                _ = AttachThreadInput(currentThread, targetThread, false);
+            }
+
+            if (attachedForeground)
+            {
+                _ = AttachThreadInput(currentThread, foregroundThread, false);
+            }
+        }
+    }
+
+    private static bool AttachInputThread(uint currentThread, uint otherThread)
+        => otherThread != 0 && otherThread != currentThread &&
+           AttachThreadInput(currentThread, otherThread, true);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BringWindowToTop(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern nint SetActiveWindow(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern void SwitchToThisWindow(nint window, [MarshalAs(UnmanagedType.Bool)] bool altTab);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint attach, uint attachTo, [MarshalAs(UnmanagedType.Bool)] bool value);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 }

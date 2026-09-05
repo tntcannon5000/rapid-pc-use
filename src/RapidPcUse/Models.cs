@@ -50,7 +50,10 @@ internal sealed record DesktopActionFailure(
     int ActionIndex,
     string ActionType,
     string SafeSummary,
-    int CompletedActions);
+    int CompletedActions,
+    string FailureCode = "native_action_failed",
+    int? NativeErrorCode = null,
+    bool? TargetWithinVirtualDesktop = null);
 
 internal sealed record ImageContextMetric(
     string DisplayId,
@@ -161,4 +164,10 @@ internal sealed class PcActionException : Exception
         Data["action_type"] = actionType;
         Data["action_summary"] = safeDescription;
     }
+}
+
+internal sealed class NativeInputStageException(string stage, Exception innerException)
+    : Exception("A native input stage failed.", innerException)
+{
+    internal string Stage { get; } = stage;
 }

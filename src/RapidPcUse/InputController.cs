@@ -41,6 +41,11 @@ internal sealed class InputController
             exception.Data["virtual_desktop_top"] = NativeMethods.GetSystemMetrics(NativeMethods.SmYVirtualScreen);
             exception.Data["virtual_desktop_width"] = NativeMethods.GetSystemMetrics(NativeMethods.SmCxVirtualScreen);
             exception.Data["virtual_desktop_height"] = NativeMethods.GetSystemMetrics(NativeMethods.SmCyVirtualScreen);
+            var virtualRight = (int)exception.Data["virtual_desktop_left"]! + (int)exception.Data["virtual_desktop_width"]!;
+            var virtualBottom = (int)exception.Data["virtual_desktop_top"]! + (int)exception.Data["virtual_desktop_height"]!;
+            exception.Data["target_within_virtual_desktop"] =
+                screenX >= (int)exception.Data["virtual_desktop_left"]! && screenX < virtualRight &&
+                screenY >= (int)exception.Data["virtual_desktop_top"]! && screenY < virtualBottom;
             throw exception;
         }
     }
@@ -58,13 +63,37 @@ internal sealed class InputController
         int count,
         Action checkOperation)
     {
-        Move(monitor, x, y);
+        try
+        {
+            Move(monitor, x, y);
+        }
+        catch (Exception exception)
+        {
+            throw new NativeInputStageException("pointer_move", exception);
+        }
+
         var pacingMilliseconds = 0;
         for (var index = 0; index < count; index++)
         {
             pacingMilliseconds += _clickPacer.BeforeClick(checkOperation);
-            MouseDown(button);
-            MouseUp(button);
+            try
+            {
+                MouseDown(button);
+            }
+            catch (Exception exception)
+            {
+                throw new NativeInputStageException("button_down", exception);
+            }
+
+            try
+            {
+                MouseUp(button);
+            }
+            catch (Exception exception)
+            {
+                throw new NativeInputStageException("button_up", exception);
+            }
+
             _clickPacer.MarkReleased();
         }
 
