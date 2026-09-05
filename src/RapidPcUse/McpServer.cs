@@ -324,7 +324,7 @@ internal sealed class McpServer(
                     state_unchanged = true,
                 },
                 exception: exception);
-            return ControlBusyResult();
+            return ControlBusyResult(retryable: name is "pc_run" or "pc_observe");
         }
         catch (DesktopInputUnavailableException exception)
         {
@@ -1530,9 +1530,11 @@ internal sealed class McpServer(
         };
     }
 
-    private static Dictionary<string, object?> ControlBusyResult()
+    private static Dictionary<string, object?> ControlBusyResult(bool retryable)
     {
-        const string summary = "Another Rapid PC Use host currently controls this Windows desktop. No action was executed; retry after that session releases control.";
+        var summary = retryable
+            ? "Another Rapid PC Use host currently controls this Windows desktop. No action was executed; retry after that session releases control."
+            : "Another Rapid PC Use host controlled the desktop while this paused task tried to resume. No action was executed in this call, but the continuation token is no longer replayable. Start a new PC run from the current visible state after the other session releases control.";
         return new Dictionary<string, object?>
         {
             ["content"] = new object[]
@@ -1554,7 +1556,7 @@ internal sealed class McpServer(
                 ["telemetrySessionId"] = DriverLog.SessionId,
                 ["confirmation"] = null,
                 ["handoff"] = null,
-                ["retryable"] = true,
+                ["retryable"] = retryable,
                 ["no_actions_executed"] = true,
                 ["state_unchanged"] = true,
                 ["code"] = "desktop_control_busy",

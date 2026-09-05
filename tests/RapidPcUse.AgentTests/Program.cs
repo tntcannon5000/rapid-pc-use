@@ -65,6 +65,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MCP pc_run accepts real Windows process names with spaces", McpRunAcceptsSpacedProcessNames),
     ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
+    ("cross-host contention cannot replay a paused continuation", McpResumeReportsControlBusyAsNonReplayable),
     ("blocked native input fails before the model and releases control", McpRunReportsInputUnavailableWithoutFailure),
     ("blocked input cannot replay a paused continuation", McpResumeReportsInputUnavailableAsNonReplayable),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
@@ -664,6 +665,46 @@ static Task McpRunReportsControlBusyWithoutFailure()
     Assert(structured.GetProperty("retryable").GetBoolean(), "desktop contention was not marked retryable");
     Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "desktop contention did not guarantee zero native input");
     Assert(provider.Requests.Count == 0, "desktop contention reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpResumeReportsControlBusyAsNonReplayable()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
+    ]);
+    using var desktop = new ReacquireControlBusyDesktop(Observation(1, [1]));
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
+    var input = JsonSerializer.Serialize(new
+    {
+        jsonrpc = "2.0",
+        id = 1,
+        method = "tools/call",
+        @params = new
+        {
+            name = "pc_resume",
+            arguments = new
+            {
+                session_id = paused.SessionId,
+                confirmation_id = confirmation.ConfirmationId,
+                decision = "approve_once",
+            },
+        },
+    }) + "\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "contended continuation did not block");
+    Assert(structured.GetProperty("code").GetString() == "desktop_control_busy", "contended continuation lost its reason code");
+    Assert(!structured.GetProperty("retryable").GetBoolean(), "contended continuation was incorrectly replayable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "contended continuation did not guarantee zero new actions");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "contended continuation changed visible desktop state");
     return Task.CompletedTask;
 }
 
@@ -1534,6 +1575,28 @@ internal sealed class ReacquireInputUnavailableDesktop(Observation initial) : IP
     public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
     public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
         => throw new InvalidOperationException("The reacquisition fixture cannot act.");
+    public void ThrowIfControlLost()
+    {
+    }
+    public void Stop()
+    {
+    }
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class ReacquireControlBusyDesktop(Observation initial) : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+    private int _observations;
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl)
+        => Interlocked.Increment(ref _observations) == 1
+            ? initial
+            : throw new ControlSessionBusyException(new IOException("fixture resumed into contention"));
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The reacquisition contention fixture cannot act.");
     public void ThrowIfControlLost()
     {
     }

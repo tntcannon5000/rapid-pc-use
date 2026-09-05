@@ -7,6 +7,7 @@
 - Guarantee deterministic actuator-fixture cleanup on success and every early failure path so a blocked-input benchmark cannot lock the next build.
 - Preserve the exact bounded native pointer-stage code on terminal inner-loop results and stop after two repeated move, button, or wheel failures.
 - Run the global input gate only when a new desktop lease is acquired, and mark failed paused-task reacquisition as non-replayable so prior task effects are never mistaken for a fresh zero-state run.
+- Mark desktop contention during `pc_resume` or `pc_continue` as non-replayable after the continuation token is consumed; only fresh `pc_run` and `pc_observe` calls advertise safe retry.
 - Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
 - Change the default inner controller to `gpt-5.6-sol` with medium reasoning.
 - Record each failed provider attempt with its bounded stage, safe reason code, retry decision, latency, exception type, and HRESULT while continuing to omit prompts, screenshots, credentials, response bodies, and exception messages.
