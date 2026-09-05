@@ -16,7 +16,15 @@ This repository is a **public beta**. The capture backend is still GDI-based and
 
 ## Install
 
-For agents or automated systems installing or updating Rapid PC Use, clone this repository and follow [`agent_install/AGENT_INSTALL_INSTRUCTIONS.md`](./agent_install/AGENT_INSTALL_INSTRUCTIONS.md).
+The supported agent-install experience is intentionally simple. Give a coding agent this repository URL and say **"Install this for me"**:
+
+```text
+https://github.com/tntcannon5000/rapid-pc-use
+
+Install this for me.
+```
+
+The repository-root [`AGENTS.md`](./AGENTS.md) routes that explicit request to the complete [`agent_install/AGENT_INSTALL_INSTRUCTIONS.md`](./agent_install/AGENT_INSTALL_INSTRUCTIONS.md) procedure. A compatible agent will clone or safely update the official `main` branch, run the single supported installer, verify the installed copies, and tell you to restart Codex or ChatGPT desktop. Merely sharing the URL without asking to install it does not authorize installation.
 
 For manual installation, run the same entry point from the repository root:
 

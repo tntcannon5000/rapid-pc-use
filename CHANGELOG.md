@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
+
 ## 0.2.0 - 2026-09-04
 
 - Enable precise implicit skill routing for genuinely visual Windows tasks while keeping shell, API, connector, filesystem, and structured-browser work on their faster native paths.
