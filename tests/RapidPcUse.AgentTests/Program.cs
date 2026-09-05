@@ -66,6 +66,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
     ("blocked native input fails before the model and releases control", McpRunReportsInputUnavailableWithoutFailure),
+    ("blocked input cannot replay a paused continuation", McpResumeReportsInputUnavailableAsNonReplayable),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
@@ -687,6 +688,47 @@ static Task McpRunReportsInputUnavailableWithoutFailure()
     Assert(structured.GetProperty("control_released").GetBoolean(), "blocked native input did not report released control");
     Assert(structured.GetProperty("native_error_code").GetInt32() == 0, "blocked native input omitted the native error code");
     Assert(provider.Requests.Count == 0, "blocked native input reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpResumeReportsInputUnavailableAsNonReplayable()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
+    ]);
+    using var desktop = new ReacquireInputUnavailableDesktop(Observation(1, [1]));
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
+    var input = JsonSerializer.Serialize(new
+    {
+        jsonrpc = "2.0",
+        id = 1,
+        method = "tools/call",
+        @params = new
+        {
+            name = "pc_resume",
+            arguments = new
+            {
+                session_id = paused.SessionId,
+                confirmation_id = confirmation.ConfirmationId,
+                decision = "approve_once",
+            },
+        },
+    }) + "\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "failed continuation reacquisition did not block");
+    Assert(structured.GetProperty("code").GetString() == "desktop_input_blocked", "failed continuation reacquisition lost its reason code");
+    Assert(!structured.GetProperty("retryable").GetBoolean(), "failed continuation reacquisition was incorrectly replayable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "failed continuation reacquisition did not guarantee zero new actions");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "failed continuation reacquisition changed visible desktop state");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "failed continuation reacquisition retained control");
     return Task.CompletedTask;
 }
 
@@ -1476,6 +1518,28 @@ internal sealed class InputUnavailableDesktop : IPcDesktop, IDisposable
         => throw new InvalidOperationException("The unavailable-input fixture cannot act.");
     public void ThrowIfControlLost() => throw new InvalidOperationException("The unavailable-input fixture never acquired control.");
     public void Stop() => _control.Cancel();
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class ReacquireInputUnavailableDesktop(Observation initial) : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+    private int _observations;
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl)
+        => Interlocked.Increment(ref _observations) == 1
+            ? initial
+            : throw new DesktopInputUnavailableException(0, "fixture reacquisition input block");
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The reacquisition fixture cannot act.");
+    public void ThrowIfControlLost()
+    {
+    }
+    public void Stop()
+    {
+    }
     public void Dispose() => _control.Dispose();
 }
 

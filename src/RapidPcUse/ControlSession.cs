@@ -36,13 +36,13 @@ internal sealed class ControlSession : IDisposable
         }
     }
 
-    internal void Start()
+    internal bool Start()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_state.IsActive)
         {
             _state.Touch();
-            return;
+            return false;
         }
 
         lock (_leaseGate)
@@ -50,7 +50,7 @@ internal sealed class ControlSession : IDisposable
             if (_state.IsActive)
             {
                 _state.Touch();
-                return;
+                return false;
             }
 
             var leasePath = Path.Combine(Path.GetTempPath(), "rapid-pc-use.control.lock");
@@ -79,6 +79,7 @@ internal sealed class ControlSession : IDisposable
         }
 
         DriverLog.Info("control.acquired", "Native mouse and keyboard control was acquired and the user takeover cue is visible.");
+        return true;
     }
 
     internal void Touch() => _state.Touch();

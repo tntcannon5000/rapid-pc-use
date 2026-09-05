@@ -346,7 +346,9 @@ internal sealed class McpServer(
                     control_released = true,
                 },
                 exception: exception);
-            return InputUnavailableResult(exception.NativeErrorCode);
+            return InputUnavailableResult(
+                exception.NativeErrorCode,
+                retryable: name is "pc_run" or "pc_observe");
         }
         catch (Exception exception) when (name is "pc_knowledge_search" or "pc_knowledge_update" or "pc_runbook_search" or "pc_runbook_update")
         {
@@ -1561,9 +1563,11 @@ internal sealed class McpServer(
         };
     }
 
-    private static Dictionary<string, object?> InputUnavailableResult(int nativeErrorCode)
+    private static Dictionary<string, object?> InputUnavailableResult(int nativeErrorCode, bool retryable)
     {
-        const string summary = "Windows is currently blocking synthetic pointer input on the interactive desktop. No action was executed and PC control was released. End any exclusive-input or remote-control mode, return to the unlocked default desktop, then retry.";
+        var summary = retryable
+            ? "Windows is currently blocking synthetic pointer input on the interactive desktop. No action was executed and PC control was released. End any exclusive-input or remote-control mode, return to the unlocked default desktop, then retry."
+            : "Windows blocked synthetic pointer input while reacquiring control for a paused task. No action was executed in this call and PC control was released, but the continuation token is no longer replayable. Restore desktop input and start a new PC run from the current visible state.";
         return new Dictionary<string, object?>
         {
             ["content"] = new object[]
@@ -1585,7 +1589,7 @@ internal sealed class McpServer(
                 ["telemetrySessionId"] = DriverLog.SessionId,
                 ["confirmation"] = null,
                 ["handoff"] = null,
-                ["retryable"] = true,
+                ["retryable"] = retryable,
                 ["no_actions_executed"] = true,
                 ["state_unchanged"] = true,
                 ["control_released"] = true,

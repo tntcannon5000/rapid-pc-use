@@ -44,10 +44,13 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             throw new ArgumentException("Screen capture requires begin_control=true so the user-visible control cue remains present.");
         }
 
-        _session.Start();
+        var acquiredControl = _session.Start();
         try
         {
-            InputController.AssertPointerAvailable();
+            if (acquiredControl)
+            {
+                InputController.AssertPointerAvailable();
+            }
         }
         catch (DesktopInputUnavailableException)
         {
