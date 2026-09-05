@@ -13,6 +13,7 @@ $agentTestsProject = Join-Path $root 'tests\RapidPcUse.AgentTests\RapidPcUse.Age
 $benchmarkTests = Join-Path $root 'tests\BenchmarkSupport.Tests.ps1'
 $realWorldBenchmarkTests = Join-Path $root 'tests\RealWorldBenchmark.Tests.ps1'
 $pluginRoutingTests = Join-Path $root 'tests\PluginRouting.Tests.ps1'
+$agentInstallContractTests = Join-Path $root 'tests\AgentInstallContract.Tests.ps1'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
@@ -78,6 +79,7 @@ finally {
 & $benchmarkTests
 & $realWorldBenchmarkTests
 & $pluginRoutingTests
+& $agentInstallContractTests
 
 $parseErrors = @()
 $scriptFiles = @(
