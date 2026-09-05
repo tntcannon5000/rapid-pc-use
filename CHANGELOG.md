@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Fail fast when Windows is globally rejecting synthetic pointer input: verify the interactive input path without moving the cursor, release control, skip the model request, and return a stable recoverable `desktop_input_blocked` result with zero-action guarantees.
+- Verify absolute pointer coordinates before pressing a button, detect ignored relative motion when movement is possible, preflight button-down and wheel input, and preserve stage-specific failures across move, click, drag, mouse-button, and scroll actions.
+- Guarantee deterministic actuator-fixture cleanup on success and every early failure path so a blocked-input benchmark cannot lock the next build.
 - Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
 - Change the default inner controller to `gpt-5.6-sol` with medium reasoning.
 - Record each failed provider attempt with its bounded stage, safe reason code, retry decision, latency, exception type, and HRESULT while continuing to omit prompts, screenshots, credentials, response bodies, and exception messages.

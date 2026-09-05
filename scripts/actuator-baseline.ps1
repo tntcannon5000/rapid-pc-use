@@ -375,6 +375,8 @@ finally {
         [void]$process.WaitForExit(2000)
     }
     $env:RAPID_PC_CAPTURE_TIER = $previousCaptureTier
+    & $fixtureScript -Phase Cleanup -FixtureId $FixtureId -RunNumber 1 -Repetition 1 `
+        -Model 'local-actuator' -Reasoning 'none' -CaptureTier $CaptureTier -AllowBackground
 }
 
 if ($process.ExitCode -ne 0) {

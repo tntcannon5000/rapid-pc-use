@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Reset', 'Verify')]
+    [ValidateSet('Reset', 'Verify', 'Cleanup')]
     [string]$Phase,
     [Parameter(Mandatory)]
     [ValidateSet('click-ladder-v1', 'form-tab-v1')]
@@ -112,6 +112,11 @@ function Set-PerformanceFixtureFocus {
         Start-Sleep -Milliseconds 10
     }
     throw 'The performance fixture did not retain keyboard focus.'
+}
+
+if ($Phase -eq 'Cleanup') {
+    Stop-PerformanceFixture
+    return
 }
 
 if ($Phase -eq 'Reset') {

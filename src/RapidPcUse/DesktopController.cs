@@ -752,6 +752,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     "pointer_move" => "pointer_move_failed",
                     "button_down" => "button_down_failed",
                     "button_up" => "button_up_failed",
+                    "pointer_scroll" => "pointer_scroll_failed",
                     _ => "native_action_failed",
                 };
             }
