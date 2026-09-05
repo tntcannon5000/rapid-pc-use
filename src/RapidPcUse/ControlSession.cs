@@ -60,7 +60,7 @@ internal sealed class ControlSession : IDisposable
             }
             catch (IOException exception)
             {
-                throw new InvalidOperationException("Another Rapid PC Use session already controls this Windows desktop.", exception);
+                throw new ControlSessionBusyException(exception);
             }
 
             try
@@ -235,3 +235,6 @@ internal sealed class ControlSession : IDisposable
         return source;
     }
 }
+
+internal sealed class ControlSessionBusyException(Exception innerException)
+    : InvalidOperationException("Another Rapid PC Use session already controls this Windows desktop.", innerException);

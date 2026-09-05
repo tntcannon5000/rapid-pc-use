@@ -14,6 +14,7 @@ $benchmarkTests = Join-Path $root 'tests\BenchmarkSupport.Tests.ps1'
 $realWorldBenchmarkTests = Join-Path $root 'tests\RealWorldBenchmark.Tests.ps1'
 $pluginRoutingTests = Join-Path $root 'tests\PluginRouting.Tests.ps1'
 $agentInstallContractTests = Join-Path $root 'tests\AgentInstallContract.Tests.ps1'
+$controlContentionTests = Join-Path $root 'tests\ControlContention.Tests.ps1'
 $plugin = Join-Path $root 'plugin\rapid-pc-use'
 $manifestPath = Join-Path $plugin '.codex-plugin\plugin.json'
 $executable = Join-Path $plugin 'bin\win-x64\rapid-pc-use.exe'
@@ -156,6 +157,7 @@ foreach ($requiredFile in @(
 
 $smoke = $null
 if (-not $SkipSmoke) {
+    & $controlContentionTests
     $smoke = & (Join-Path $PSScriptRoot 'smoke.ps1')
     if ($LASTEXITCODE -ne 0) {
         throw 'Active-control smoke verification failed.'

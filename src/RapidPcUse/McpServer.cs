@@ -306,6 +306,26 @@ internal sealed class McpServer(
                 exception: exception);
             return RequestRejectedResult(exception);
         }
+        catch (ControlSessionBusyException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.control_busy",
+                $"{name} could not acquire desktop control because another Rapid PC Use host owns it.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = "desktop_control_busy",
+                    no_actions_executed = true,
+                    state_unchanged = true,
+                },
+                exception: exception);
+            return ControlBusyResult();
+        }
         catch (Exception exception) when (name is "pc_knowledge_search" or "pc_knowledge_update" or "pc_runbook_search" or "pc_runbook_update")
         {
             stopwatch.Stop();
@@ -1466,6 +1486,39 @@ internal sealed class McpServer(
                 ["no_actions_executed"] = true,
                 ["state_unchanged"] = true,
                 ["code"] = exception.Code,
+            },
+            ["isError"] = false,
+        };
+    }
+
+    private static Dictionary<string, object?> ControlBusyResult()
+    {
+        const string summary = "Another Rapid PC Use host currently controls this Windows desktop. No action was executed; retry after that session releases control.";
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = $"PC_CONTROL_BUSY: {summary}",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "blocked",
+                ["sessionId"] = "",
+                ["summary"] = summary,
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = true,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["code"] = "desktop_control_busy",
             },
             ["isError"] = false,
         };
