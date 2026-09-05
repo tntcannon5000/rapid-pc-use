@@ -938,15 +938,28 @@ internal sealed partial class PcAgentLoop : IDisposable
         const int attempts = 3;
         for (var attempt = 1; ; attempt++)
         {
+            var attemptStarted = Stopwatch.GetTimestamp();
             try
             {
                 return await _provider.DecideAsync(request, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception exception) when (
-                IsProviderFailure(exception) &&
-                attempt < attempts &&
-                !cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (IsProviderFailure(exception))
             {
+                var willRetry = attempt < attempts && !cancellationToken.IsCancellationRequested;
+                AgentTelemetry.ProviderAttemptFailed(
+                    runId,
+                    turn,
+                    _provider,
+                    attempt,
+                    attempts,
+                    willRetry,
+                    ElapsedMicroseconds(attemptStarted, Stopwatch.GetTimestamp()),
+                    exception);
+                if (!willRetry)
+                {
+                    throw;
+                }
+
                 AgentTelemetry.Recovery(runId, turn, "provider", attempt);
                 await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), cancellationToken).ConfigureAwait(false);
             }
@@ -960,6 +973,7 @@ internal sealed partial class PcAgentLoop : IDisposable
                 provider.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 provider.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 (int)provider.StatusCode >= 500,
+            PcModelProviderStageException staged when staged.InnerException is not null => IsProviderFailure(staged.InnerException),
             HttpRequestException or IOException or InvalidOperationException or JsonException => true,
             _ => false,
         };

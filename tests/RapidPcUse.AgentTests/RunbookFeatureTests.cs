@@ -1101,8 +1101,8 @@ internal static class RunbookFeatureTests
     private static PcAgentOptions Options() => new(
         Enabled: true,
         Provider: "openai",
-        Model: "gpt-5.6-luna",
-        ReasoningEffort: "low",
+        Model: "gpt-5.6-sol",
+        ReasoningEffort: "medium",
         ServiceTier: "fast",
         MaxModelTurns: 48,
         MaxActions: 96,

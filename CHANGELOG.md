@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
+- Change the default inner controller to `gpt-5.6-sol` with medium reasoning.
+- Record each failed provider attempt with its bounded stage, safe reason code, retry decision, latency, exception type, and HRESULT while continuing to omit prompts, screenshots, credentials, response bodies, and exception messages.
 
 ## 0.2.0 - 2026-09-04
 

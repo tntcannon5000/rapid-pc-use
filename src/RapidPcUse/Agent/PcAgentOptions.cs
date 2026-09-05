@@ -21,8 +21,8 @@ internal sealed record PcAgentOptions(
     internal static PcAgentOptions FromEnvironment()
     {
         var provider = ReadIdentifier("RAPID_PC_AGENT_PROVIDER", "codex").ToLowerInvariant();
-        var model = ReadIdentifier("RAPID_PC_AGENT_MODEL", "gpt-5.6-luna");
-        var reasoning = ReadEnum("RAPID_PC_AGENT_REASONING", "low", "none", "low", "medium", "high");
+        var model = ReadIdentifier("RAPID_PC_AGENT_MODEL", "gpt-5.6-sol");
+        var reasoning = ReadEnum("RAPID_PC_AGENT_REASONING", "medium", "none", "low", "medium", "high");
         var serviceTier = ReadEnum("RAPID_PC_AGENT_SERVICE_TIER", "fast", "fast", "flex");
         var imageDetail = ReadEnum("RAPID_PC_AGENT_IMAGE_DETAIL", "original", "auto", "low", "high", "original");
         var hasOpenAiKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENAI_API_KEY"));

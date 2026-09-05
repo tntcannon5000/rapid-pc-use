@@ -46,6 +46,7 @@ if (args is ["--spawn-child-probe", var dotnetHost, var pidPath, var lockPathFor
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("agent defaults use Sol with medium reasoning", AgentDefaultsUseSolMedium),
     ("Codex-session provider is keyless, ephemeral, and current-frame only", CodexSessionRequestIsBounded),
     ("Codex-session provider completes a live keyless protocol turn when requested", CodexSessionLiveTurn),
     ("OpenAI requests are stateless and current-frame only", OpenAiRequestIsBounded),
@@ -54,6 +55,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("broker provider authenticates one bounded structured decision", BrokerProviderReturnsStructuredDecision),
     ("broker provider rejects a mismatched response identity", BrokerProviderRejectsMismatchedIdentity),
     ("provider failures do not expose response bodies", ProviderFailureIsRedacted),
+    ("provider failure diagnostics identify a safe stage and reason", ProviderFailureDiagnosticsAreSafe),
     ("truncated provider streams fail closed", TruncatedProviderStreamFailsClosed),
     ("agent loop completes through replay provider", ReplayLoopCompletes),
     ("local completion guard eliminates the final model barrier", CompletionGuardEliminatesFinalModelBarrier),
@@ -130,6 +132,48 @@ foreach (var failure in failures)
 var exitCode = failures.Count == 0 ? 0 : 1;
 DriverLog.FlushAndStop(TimeSpan.FromSeconds(2));
 return exitCode;
+
+static Task AgentDefaultsUseSolMedium()
+{
+    var names = new[] { "RAPID_PC_AGENT_MODEL", "RAPID_PC_AGENT_REASONING" };
+    var previous = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+    try
+    {
+        foreach (var name in names)
+        {
+            Environment.SetEnvironmentVariable(name, null);
+        }
+
+        var options = PcAgentOptions.FromEnvironment();
+        Assert(options.Model == "gpt-5.6-sol", "the default inner model is not Sol");
+        Assert(options.ReasoningEffort == "medium", "the default inner reasoning effort is not medium");
+    }
+    finally
+    {
+        foreach (var pair in previous)
+        {
+            Environment.SetEnvironmentVariable(pair.Key, pair.Value);
+        }
+    }
+
+    return Task.CompletedTask;
+}
+
+static Task ProviderFailureDiagnosticsAreSafe()
+{
+    const string secret = "sensitive-provider-response";
+    var exception = PcModelProviderStageException.Wrap(
+        "turn_wait",
+        new CodexAppServerException("turn_not_completed", secret));
+    var failure = ProviderFailureDiagnostics.Capture(exception);
+    Assert(failure.Stage == "turn_wait", "provider diagnostics lost the failure stage");
+    Assert(failure.ReasonCode == "turn_not_completed", "provider diagnostics lost the safe reason code");
+    Assert(failure.ExceptionType.EndsWith(nameof(CodexAppServerException), StringComparison.Ordinal),
+        "provider diagnostics lost the root exception type");
+    Assert(!JsonSerializer.Serialize(failure).Contains(secret, StringComparison.Ordinal),
+        "provider diagnostics exposed the provider response");
+    return Task.CompletedTask;
+}
 
 static Task CodexSessionRequestIsBounded()
 {
@@ -1046,8 +1090,8 @@ static Task StateLimitsRejectImageData()
 static PcAgentOptions Options() => new(
     Enabled: true,
     Provider: "openai",
-    Model: "gpt-5.6-luna",
-    ReasoningEffort: "low",
+    Model: "gpt-5.6-sol",
+    ReasoningEffort: "medium",
     ServiceTier: "fast",
     MaxModelTurns: 48,
     MaxActions: 96,
