@@ -568,6 +568,8 @@ internal sealed class McpServer(
         confirmation_requested = result.Confirmation is not null,
         handoff_requested = result.Handoff is not null,
         returned_final_frame = result.FinalObservation is not null,
+        code = result.Code,
+        native_error_code = result.NativeErrorCode,
     };
 
     private static Dictionary<string, object?> AgentResult(PcRunResult result)
@@ -601,6 +603,13 @@ internal sealed class McpServer(
                     ["expiresAt"] = result.Handoff.ExpiresUtc.ToString("O"),
                 },
         };
+        if (result.Code is not null)
+        {
+            structured["code"] = result.Code;
+            structured["native_error_code"] = result.NativeErrorCode;
+            structured["control_released"] = result.Status is not PcAgentStatus.NeedsConfirmation and not PcAgentStatus.NeedsHandoff;
+        }
+
         var message = result.Status switch
         {
             PcAgentStatus.NeedsConfirmation when result.Confirmation is not null =>

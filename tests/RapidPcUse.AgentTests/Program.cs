@@ -76,6 +76,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("provider exhaustion reports a completed direct launch", ProviderExhaustionReportsCompletedLaunch),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
     ("repeated native pointer suppression blocks without wasting model turns", RepeatedPointerSuppressionBlocks),
+    ("MCP pc_run preserves terminal native pointer diagnostics", McpRunPreservesPointerFailureCode),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
     ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
     ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
@@ -1027,7 +1028,33 @@ static Task RepeatedPointerSuppressionBlocks()
     Assert(result.Status == PcAgentStatus.Blocked, "repeated pointer suppression did not block safely");
     Assert(result.ModelTurns == 2, "repeated pointer suppression wasted additional model turns");
     Assert(result.ActionsExecuted == 0, "suppressed pointer actions were counted as executed");
-    Assert(result.Summary.Contains("pointer movement", StringComparison.Ordinal), "pointer suppression returned an unactionable summary");
+    Assert(result.Summary.Contains("pointer", StringComparison.Ordinal), "pointer suppression returned an unactionable summary");
+    Assert(result.Code == "pointer_move_failed", "pointer suppression omitted its stable terminal code");
+    return Task.CompletedTask;
+}
+
+static Task McpRunPreservesPointerFailureCode()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-0\",\"x\":500,\"y\":500}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "button_down_failed");
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "button_down_failed");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "terminal pointer failure did not remain blocked");
+    Assert(structured.GetProperty("code").GetString() == "button_down_failed", "terminal pointer failure code was lost at the MCP boundary");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "terminal pointer failure did not report released control");
     return Task.CompletedTask;
 }
 

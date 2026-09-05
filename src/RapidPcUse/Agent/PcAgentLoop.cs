@@ -628,14 +628,16 @@ internal sealed partial class PcAgentLoop : IDisposable
                                 act.ExpectedChange,
                                 $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Driver code: {actResult.Failure.FailureCode}. Continue from the current screenshot using a different approach."));
                             RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_interrupted");
-                            if (actResult.Failure.FailureCode == "pointer_move_failed" && repeatedNativeFailures >= 2)
+                            if (IsPointerFailure(actResult.Failure.FailureCode) && repeatedNativeFailures >= 2)
                             {
                                 return Complete(
                                     session,
                                     PcAgentStatus.Blocked,
-                                    "Windows suppressed native pointer movement twice. No further click was attempted; use a keyboard-only route or restore synthetic pointer input before retrying.",
+                                    $"Windows rejected native pointer stage '{actResult.Failure.FailureCode}' twice. No further pointer action was attempted; restore synthetic pointer input before retrying.",
                                     segmentStarted,
-                                    session.Request.ReturnFinalScreenshot ? observation : null);
+                                    session.Request.ReturnFinalScreenshot ? observation : null,
+                                    actResult.Failure.FailureCode,
+                                    actResult.Failure.NativeErrorCode);
                             }
 
                             break;
@@ -841,7 +843,9 @@ internal sealed partial class PcAgentLoop : IDisposable
         PcAgentStatus status,
         string summary,
         long segmentStarted,
-        Observation? finalObservation)
+        Observation? finalObservation,
+        string? code = null,
+        int? nativeErrorCode = null)
     {
         _desktop.ThrowIfControlLost();
         session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
@@ -864,7 +868,7 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.RunId,
             session.RunbookExecutionSamples.Count,
             routeLearningMicroseconds);
-        var result = CreateResult(session, status, summary, null, finalObservation);
+        var result = CreateResult(session, status, summary, null, finalObservation, code: code, nativeErrorCode: nativeErrorCode);
 
         session.Clear();
         AgentTelemetry.RunCompleted(
@@ -884,7 +888,9 @@ internal sealed partial class PcAgentLoop : IDisposable
         string summary,
         PcConfirmation? confirmation,
         Observation? finalObservation,
-        PcHandoff? handoff = null)
+        PcHandoff? handoff = null,
+        string? code = null,
+        int? nativeErrorCode = null)
         => new(
             status,
             session.RunId,
@@ -895,7 +901,12 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.TelemetrySessionId,
             confirmation,
             handoff,
-            finalObservation);
+            finalObservation,
+            code,
+            nativeErrorCode);
+
+    private static bool IsPointerFailure(string code)
+        => code is "pointer_move_failed" or "button_down_failed" or "button_up_failed" or "pointer_scroll_failed";
 
     private void ValidateRequest(PcRunRequest request)
     {

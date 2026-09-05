@@ -200,7 +200,9 @@ internal sealed record PcRunResult(
     string TelemetrySessionId,
     PcConfirmation? Confirmation,
     PcHandoff? Handoff,
-    Observation? FinalObservation);
+    Observation? FinalObservation,
+    string? Code = null,
+    int? NativeErrorCode = null);
 
 internal interface IPcDesktop
 {
