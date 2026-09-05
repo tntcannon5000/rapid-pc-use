@@ -155,6 +155,12 @@ internal sealed class PcActionPlanValidationException : ArgumentException
 internal sealed class ControlSessionEndedException()
     : Exception("The desktop control session ended before the action completed.");
 
+internal sealed class DesktopInputUnavailableException(int nativeErrorCode, string message)
+    : InvalidOperationException(message)
+{
+    internal int NativeErrorCode { get; } = nativeErrorCode;
+}
+
 internal sealed class PcActionException : Exception
 {
     internal PcActionException(int actionIndex, string actionType, string safeDescription, Exception innerException)

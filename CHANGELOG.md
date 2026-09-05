@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fail fast when Windows is globally rejecting synthetic pointer input: verify the interactive input path without moving the cursor, release control, skip the model request, and return a stable recoverable `desktop_input_blocked` result with zero-action guarantees.
 - Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
 - Change the default inner controller to `gpt-5.6-sol` with medium reasoning.
 - Record each failed provider attempt with its bounded stage, safe reason code, retry decision, latency, exception type, and HRESULT while continuing to omit prompts, screenshots, credentials, response bodies, and exception messages.

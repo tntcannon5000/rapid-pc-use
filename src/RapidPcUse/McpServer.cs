@@ -326,6 +326,28 @@ internal sealed class McpServer(
                 exception: exception);
             return ControlBusyResult();
         }
+        catch (DesktopInputUnavailableException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.input_unavailable",
+                $"{name} stopped before capture because Windows rejected the native input health check.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = "desktop_input_blocked",
+                    native_error_code = exception.NativeErrorCode,
+                    no_actions_executed = true,
+                    state_unchanged = true,
+                    control_released = true,
+                },
+                exception: exception);
+            return InputUnavailableResult(exception.NativeErrorCode);
+        }
         catch (Exception exception) when (name is "pc_knowledge_search" or "pc_knowledge_update" or "pc_runbook_search" or "pc_runbook_update")
         {
             stopwatch.Stop();
@@ -1525,6 +1547,41 @@ internal sealed class McpServer(
                 ["no_actions_executed"] = true,
                 ["state_unchanged"] = true,
                 ["code"] = "desktop_control_busy",
+            },
+            ["isError"] = false,
+        };
+    }
+
+    private static Dictionary<string, object?> InputUnavailableResult(int nativeErrorCode)
+    {
+        const string summary = "Windows is currently blocking synthetic pointer input on the interactive desktop. No action was executed and PC control was released. End any exclusive-input or remote-control mode, return to the unlocked default desktop, then retry.";
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = $"PC_INPUT_UNAVAILABLE: {summary}",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "blocked",
+                ["sessionId"] = "",
+                ["summary"] = summary,
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = true,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["control_released"] = true,
+                ["code"] = "desktop_input_blocked",
+                ["native_error_code"] = nativeErrorCode,
             },
             ["isError"] = false,
         };

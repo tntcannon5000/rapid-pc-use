@@ -78,6 +78,7 @@ The capture backend is isolated behind the host boundary and uses parallel GDI c
 - The native Win32 overlay is click-through and topmost. Windows is asked to exclude it from screenshots; a privacy-safe warning is recorded if that OS capability is unavailable.
 - A `WH_KEYBOARD_LL` hook reacts only to physical Escape, not driver-injected Escape.
 - Input uses `SetCursorPos` and `SendInput`; typed text is emitted as Unicode keystrokes, never clipboard paste.
+- Control acquisition performs a no-displacement pointer health check. If Windows is globally blocking synthetic input, the driver releases its overlay and lease before capture or model inference and returns recoverable code `desktop_input_blocked` with zero actions executed.
 - A current-user ownership lease prevents two driver processes from controlling the same desktop.
 - Recoverable request, frame, provider, progress, and partial-action conditions stay inside the visual loop. Only user takeover, an unavailable Windows security boundary, exhausted bounded recovery, or a broken driver transport ends control.
 - Pre-execution `PC_ACTION_REJECTED` responses are recoverable request corrections, not driver failures. They execute nothing and do not release control.

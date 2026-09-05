@@ -50,6 +50,29 @@ internal sealed class InputController
         }
     }
 
+    internal static void AssertPointerAvailable()
+    {
+        Marshal.SetLastPInvokeError(0);
+        if (!NativeMethods.GetCursorPos(out var currentPosition))
+        {
+            throw new DesktopInputUnavailableException(
+                Marshal.GetLastPInvokeError(),
+                "Windows did not expose the current native cursor position on the interactive desktop.");
+        }
+
+        // Setting the cursor to its existing position is a side-effect-free capability
+        // check. In particular, Windows returns false here while another component has
+        // blocked synthetic input, even though SendInput can misleadingly report that it
+        // accepted an event which the desktop then discards.
+        Marshal.SetLastPInvokeError(0);
+        if (!NativeMethods.SetCursorPos(currentPosition.X, currentPosition.Y))
+        {
+            throw new DesktopInputUnavailableException(
+                Marshal.GetLastPInvokeError(),
+                "Windows is currently rejecting synthetic pointer input on the interactive desktop.");
+        }
+    }
+
     internal static void RelativeMove(int x, int y)
     {
         SendMouse(NativeMethods.MouseeventfMove, 0, x, y);

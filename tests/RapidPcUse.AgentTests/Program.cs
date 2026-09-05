@@ -65,6 +65,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MCP pc_run accepts real Windows process names with spaces", McpRunAcceptsSpacedProcessNames),
     ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
+    ("blocked native input fails before the model and releases control", McpRunReportsInputUnavailableWithoutFailure),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
@@ -661,6 +662,30 @@ static Task McpRunReportsControlBusyWithoutFailure()
     Assert(structured.GetProperty("retryable").GetBoolean(), "desktop contention was not marked retryable");
     Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "desktop contention did not guarantee zero native input");
     Assert(provider.Requests.Count == 0, "desktop contention reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpRunReportsInputUnavailableWithoutFailure()
+{
+    using var provider = new RecordingProvider([]);
+    using var desktop = new InputUnavailableDesktop();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Inspect the harmless fixture.\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    var structured = result.GetProperty("structuredContent");
+    Assert(!result.GetProperty("isError").GetBoolean(), "blocked native input became a terminal MCP error");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "blocked native input did not return a bounded blocked result");
+    Assert(structured.GetProperty("code").GetString() == "desktop_input_blocked", "blocked native input omitted its stable reason code");
+    Assert(structured.GetProperty("retryable").GetBoolean(), "blocked native input was not marked retryable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "blocked native input did not guarantee zero native input");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "blocked native input did not guarantee unchanged desktop state");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "blocked native input did not report released control");
+    Assert(structured.GetProperty("native_error_code").GetInt32() == 0, "blocked native input omitted the native error code");
+    Assert(provider.Requests.Count == 0, "blocked native input reached the model provider");
     return Task.CompletedTask;
 }
 
@@ -1409,6 +1434,20 @@ internal sealed class ControlBusyDesktop : IPcDesktop, IDisposable
     public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
         => throw new InvalidOperationException("The contention fixture cannot act.");
     public void ThrowIfControlLost() => throw new InvalidOperationException("The contention fixture never acquired control.");
+    public void Stop() => _control.Cancel();
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class InputUnavailableDesktop : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl) => throw new DesktopInputUnavailableException(0, "fixture input block");
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The unavailable-input fixture cannot act.");
+    public void ThrowIfControlLost() => throw new InvalidOperationException("The unavailable-input fixture never acquired control.");
     public void Stop() => _control.Cancel();
     public void Dispose() => _control.Dispose();
 }

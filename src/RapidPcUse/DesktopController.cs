@@ -45,6 +45,18 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         }
 
         _session.Start();
+        try
+        {
+            InputController.AssertPointerAvailable();
+        }
+        catch (DesktopInputUnavailableException)
+        {
+            // A run that cannot deliver native input must not spend a model turn or
+            // leave the visible control cue/desktop lease behind.
+            _session.Stop();
+            throw;
+        }
+
         _captureActiveWindow = captureActiveWindow;
         var operation = _session.BeginOperation();
         Action checkOperation = () => _session.ThrowIfCannotContinue(operation);

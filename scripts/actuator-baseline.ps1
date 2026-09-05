@@ -80,6 +80,12 @@ function Assert-McpActionCompleted([object]$Response, [string]$Phase) {
 }
 
 function Get-FrameManifest([object]$Response) {
+    if ($Response.result.structuredContent.status -eq 'blocked') {
+        $code = [string]$Response.result.structuredContent.code
+        $summary = [string]$Response.result.structuredContent.summary
+        throw "The driver could not acquire a usable desktop input path (code '$code'): $summary"
+    }
+
     $text = [string]($Response.result.content |
             Where-Object { $_.type -eq 'text' -and $_.text -like 'RAPID_PC_FRAME *' } |
             Select-Object -First 1 -ExpandProperty text)
