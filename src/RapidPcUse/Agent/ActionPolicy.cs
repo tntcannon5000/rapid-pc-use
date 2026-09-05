@@ -55,9 +55,9 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
         }
 
         if (normalized.Length == 0 || normalized.Length > SecurityLimits.MaxAgentProcessNameCharacters ||
-            normalized.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.'))
+            normalized.Any(character => char.IsControl(character) || character is '\\' or '/' or ':' or '*' or '?' or '"' or '<' or '>' or '|'))
         {
-            throw new InvalidOperationException("The foreground process name is invalid.");
+            throw new ArgumentException("The process name is invalid.");
         }
 
         return normalized.ToLowerInvariant();

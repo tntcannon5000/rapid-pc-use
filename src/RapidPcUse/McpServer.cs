@@ -287,6 +287,25 @@ internal sealed class McpServer(
                 "USER_TAKEOVER: The user is now operating the PC. Stop immediately, make no more PC-use calls in this turn, and end the turn.",
                 isError: false);
         }
+        catch (ToolRequestValidationException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.request_rejected",
+                $"{name} rejected invalid arguments before changing PC state.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = exception.Code,
+                    state_unchanged = true,
+                },
+                exception: exception);
+            return RequestRejectedResult(exception);
+        }
         catch (Exception exception) when (name is "pc_knowledge_search" or "pc_knowledge_update" or "pc_runbook_search" or "pc_runbook_update")
         {
             stopwatch.Stop();
@@ -412,7 +431,16 @@ internal sealed class McpServer(
     private ToolOutcome RunAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var request = ParseRunRequest(arguments, loop.Options);
+        PcRunRequest request;
+        try
+        {
+            request = ParseRunRequest(arguments, loop.Options);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_run_arguments", exception);
+        }
+
         var result = loop.Run(request);
         return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
     }
@@ -420,12 +448,22 @@ internal sealed class McpServer(
     private ToolOutcome ResumeAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var sessionId = RequiredBoundedString(arguments, "session_id", 128);
-        var confirmationId = RequiredBoundedString(arguments, "confirmation_id", 128);
-        var decision = RequiredBoundedString(arguments, "decision", 32);
-        if (decision is not ("approve_once" or "deny"))
+        string sessionId;
+        string confirmationId;
+        string decision;
+        try
         {
-            throw new ArgumentException("decision must be approve_once or deny.");
+            sessionId = RequiredBoundedString(arguments, "session_id", 128);
+            confirmationId = RequiredBoundedString(arguments, "confirmation_id", 128);
+            decision = RequiredBoundedString(arguments, "decision", 32);
+            if (decision is not ("approve_once" or "deny"))
+            {
+                throw new ArgumentException("decision must be approve_once or deny.");
+            }
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_resume_arguments", exception);
         }
 
         var result = loop.Resume(sessionId, confirmationId, decision == "approve_once");
@@ -435,12 +473,23 @@ internal sealed class McpServer(
     private ToolOutcome ContinueAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var sessionId = RequiredBoundedString(arguments, "session_id", 128);
-        var handoffId = RequiredBoundedString(arguments, "handoff_id", 128);
-        var outerContext = RequiredBoundedString(
-            arguments,
-            "outer_context",
-            SecurityLimits.MaxAgentOuterContextCharacters);
+        string sessionId;
+        string handoffId;
+        string outerContext;
+        try
+        {
+            sessionId = RequiredBoundedString(arguments, "session_id", 128);
+            handoffId = RequiredBoundedString(arguments, "handoff_id", 128);
+            outerContext = RequiredBoundedString(
+                arguments,
+                "outer_context",
+                SecurityLimits.MaxAgentOuterContextCharacters);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_continue_arguments", exception);
+        }
+
         var result = loop.ResumeHandoff(sessionId, handoffId, outerContext);
         return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
     }
@@ -1390,6 +1439,38 @@ internal sealed class McpServer(
         };
     }
 
+    private static Dictionary<string, object?> RequestRejectedResult(ToolRequestValidationException exception)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = "PC_REQUEST_REJECTED: Rapid PC Use rejected invalid tool arguments before changing PC state. Correct the request and retry.",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "request_rejected",
+                ["sessionId"] = "",
+                ["summary"] = "Rapid PC Use rejected invalid tool arguments before changing PC state.",
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = true,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["code"] = exception.Code,
+            },
+            ["isError"] = false,
+        };
+    }
+
     private static IEnumerable<Exception> ExceptionChain(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
@@ -1558,6 +1639,12 @@ internal sealed class McpServer(
 
     private sealed class ProtocolLimitException()
         : Exception("The JSON-RPC message exceeded the configured character limit.");
+
+    private sealed class ToolRequestValidationException(string code, Exception innerException)
+        : Exception("A Rapid PC Use tool request was invalid.", innerException)
+    {
+        internal string Code { get; } = code;
+    }
 
     private sealed record ToolOutcome(object Result, object? LogData);
 

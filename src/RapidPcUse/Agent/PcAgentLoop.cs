@@ -322,6 +322,7 @@ internal sealed partial class PcAgentLoop : IDisposable
                         null);
                 }
 
+                session.DirectLaunchCompleted = true;
                 observation = _desktop.ObserveActiveWindow(beginControl: true);
             }
 
@@ -409,10 +410,13 @@ internal sealed partial class PcAgentLoop : IDisposable
                 }
                 catch (Exception exception) when (IsProviderFailure(exception))
                 {
+                    var summary = session.DirectLaunchCompleted
+                        ? "The requested application opened successfully, but the PC model provider remained unavailable after bounded recovery attempts. No native input action was executed."
+                        : "The PC model provider remained unavailable after bounded recovery attempts. No native input action was executed.";
                     return Complete(
                         session,
                         PcAgentStatus.Blocked,
-                        "The PC model provider remained unavailable after bounded recovery attempts.",
+                        summary,
                         segmentStarted,
                         null);
                 }
@@ -1083,6 +1087,7 @@ internal sealed partial class PcAgentLoop : IDisposable
         internal Dictionary<PcRunbookStepReference, int> LastFailedRunbookStepActionCounts { get; } = [];
         internal List<PcRunbookExecutionSample> RunbookExecutionSamples { get; } = [];
         internal bool InitialRetrievalAttempted { get; set; }
+        internal bool DirectLaunchCompleted { get; set; }
         internal string LastRetrievedContext { get; set; } = "";
 
         internal void AddOutcome(AgentActionOutcome outcome)
@@ -1117,6 +1122,7 @@ internal sealed partial class PcAgentLoop : IDisposable
             LastSuccessfulRunbookStepActionCounts.Clear();
             LastFailedRunbookStepActionCounts.Clear();
             RunbookExecutionSamples.Clear();
+            DirectLaunchCompleted = false;
             LastRetrievedContext = "";
         }
     }

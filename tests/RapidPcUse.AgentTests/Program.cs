@@ -62,12 +62,15 @@ var tests = new (string Name, Func<Task> Run)[]
     ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
+    ("MCP pc_run accepts real Windows process names with spaces", McpRunAcceptsSpacedProcessNames),
+    ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
     ("agent loop corrects a rejected action without releasing control", AgentLoopCorrectsRejectedAction),
     ("stale frames refresh without terminating low-level control", StaleFrameRefreshes),
     ("provider faults retry inside the high-level loop", ProviderFaultRetries),
+    ("provider exhaustion reports a completed direct launch", ProviderExhaustionReportsCompletedLaunch),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
     ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
@@ -595,6 +598,48 @@ static Task McpRunNormalizesOversizedBudgets()
     return Task.CompletedTask;
 }
 
+static Task McpRunAcceptsSpacedProcessNames()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), AgentWorkingState.Empty, "Change", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Fixture completed.", AgentWorkingState.Empty, "Visible fixture"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new NamedWindowInspector("DeepSeek Harness Desktop"));
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"DeepSeek Harness Desktop\"]}}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
+        "a valid Windows process name with spaces did not complete");
+    Assert(desktop.ActionBatches.Count == 1, "matching spaced process scope blocked native input");
+    return Task.CompletedTask;
+}
+
+static Task McpRunRejectsInvalidArgumentsWithoutFailure()
+{
+    using var provider = new RecordingProvider([]);
+    using var desktop = new FakeDesktop([]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"C:\\\\untrusted.exe\"]}}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    Assert(!result.GetProperty("isError").GetBoolean(), "invalid outer arguments became a terminal MCP failure");
+    Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "request_rejected",
+        "invalid outer arguments did not return a recoverable rejection");
+    Assert(desktop.StopCount == 0 && desktop.ActionBatches.Count == 0,
+        "request rejection changed desktop control state");
+    Assert(provider.Requests.Count == 0, "request rejection reached the model provider");
+    return Task.CompletedTask;
+}
+
 static Task McpRunUsesTrustedFastStart()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0}]");
@@ -855,6 +900,22 @@ static Task ProviderFaultRetries()
     var result = loop.Run(Request(maxNoProgress: 3));
     Assert(result.Status == PcAgentStatus.Completed, "provider retry did not complete");
     Assert(provider.Attempts == 3, "provider retry count is wrong");
+    return Task.CompletedTask;
+}
+
+static Task ProviderExhaustionReportsCompletedLaunch()
+{
+    using var provider = new FlakyProvider(3);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    var launcher = new FakeLaunchCoordinator();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    var result = loop.Run(Request(maxNoProgress: 3) with { LaunchUri = "discord:" });
+    Assert(result.Status == PcAgentStatus.Blocked, "exhausted provider did not block safely");
+    Assert(result.Summary.Contains("opened successfully", StringComparison.Ordinal),
+        "provider failure concealed the successful direct launch");
+    Assert(result.ActionsExecuted == 0 && desktop.ActionBatches.Count == 0,
+        "provider failure incorrectly reported native input");
+    Assert(desktop.StopCount == 1, "provider exhaustion did not release desktop control");
     return Task.CompletedTask;
 }
 
