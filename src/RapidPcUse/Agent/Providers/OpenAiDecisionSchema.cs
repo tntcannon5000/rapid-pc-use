@@ -354,7 +354,10 @@ internal static class OpenAiDecisionSchema
                 writer.WriteNumber("maxLength", SecurityLimits.MaxTypedCodeUnitsPerAction);
                 break;
             case "type_interval":
-                IntegerRange(writer, 0, SecurityLimits.MaxTypeIntervalMilliseconds);
+                IntegerRange(
+                    writer,
+                    InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+                    SecurityLimits.MaxTypeIntervalMilliseconds);
                 break;
             case "keys":
                 writer.WriteString("type", "string");

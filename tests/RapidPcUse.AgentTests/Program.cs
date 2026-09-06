@@ -908,6 +908,17 @@ static Task ScrollSchemasUseSharedLimits()
         .GetProperty("x");
     Assert(publicClickX.GetProperty("minimum").GetInt32() == 0 && publicClickX.GetProperty("maximum").GetInt32() == 1000,
         "public click coordinates contradict native execution");
+    var publicTypeInterval = pcAct.GetProperty("inputSchema")
+        .GetProperty("properties")
+        .GetProperty("actions")
+        .GetProperty("items")
+        .GetProperty("oneOf")
+        .EnumerateArray()
+        .Single(schema => schema.GetProperty("properties").GetProperty("type").GetProperty("const").GetString() == "type")
+        .GetProperty("properties")
+        .GetProperty("interval_ms");
+    Assert(publicTypeInterval.GetProperty("minimum").GetInt32() == InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+        "public typing interval minimum drifted");
 
     var options = Options();
     using var provider = new OpenAiResponsesProvider("test-key", options, new HttpClient(new NeverSendHandler()));
@@ -934,6 +945,16 @@ static Task ScrollSchemasUseSharedLimits()
     var innerScroll = scrollAction.GetProperty("properties").GetProperty("scroll_y");
     Assert(innerScroll.GetProperty("minimum").GetInt32() == SecurityLimits.MinScrollDeltaPerAction, "inner scroll minimum drifted");
     Assert(innerScroll.GetProperty("maximum").GetInt32() == SecurityLimits.MaxScrollDeltaPerAction, "inner scroll maximum drifted");
+    var typeAction = computerAct.GetProperty("parameters")
+        .GetProperty("properties")
+        .GetProperty("actions")
+        .GetProperty("items")
+        .GetProperty("anyOf")
+        .EnumerateArray()
+        .Single(schema => schema.GetProperty("properties").GetProperty("type").GetProperty("enum")[0].GetString() == "type");
+    var innerTypeInterval = typeAction.GetProperty("properties").GetProperty("interval_ms");
+    Assert(innerTypeInterval.GetProperty("minimum").GetInt32() == InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+        "inner typing interval minimum drifted");
     Assert(DesktopController.ScrollTicks(591) == 6, "591 delta units should become six wheel ticks");
     return Task.CompletedTask;
 }
@@ -1143,7 +1164,7 @@ static Task McpRunPreservesPointerFailureCode()
 
 static Task ConfirmationPausesAndResumes()
 {
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":2}]");
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
     var state = new AgentWorkingState("Credential field visible", [], "Enter fixture", [], []);
     using var provider = new ReplayPcModelProvider(
     [
@@ -1230,7 +1251,7 @@ static Task HandoffExpiryAndSchemaAreBounded()
 
 static Task HandoffClearsApprovedRisk()
 {
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":0}]");
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
     var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
     using var provider = new ReplayPcModelProvider(
     [

@@ -44,21 +44,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             throw new ArgumentException("Screen capture requires begin_control=true so the user-visible control cue remains present.");
         }
 
-        var acquiredControl = _session.Start();
-        try
-        {
-            if (acquiredControl)
-            {
-                InputController.AssertPointerAvailable();
-            }
-        }
-        catch (DesktopInputUnavailableException)
-        {
-            // A run that cannot deliver native input must not spend a model turn or
-            // leave the visible control cue/desktop lease behind.
-            _session.Stop();
-            throw;
-        }
+        _session.Start();
 
         _captureActiveWindow = captureActiveWindow;
         var operation = _session.BeginOperation();
@@ -291,8 +277,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                         var interval = OptionalBoundedInt(
                             action,
                             "interval_ms",
-                            0,
-                            0,
+                            InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+                            InputTimingPolicy.MinimumTypingIntervalMilliseconds,
                             SecurityLimits.MaxTypeIntervalMilliseconds);
                         estimatedMilliseconds += (long)text.Length * interval;
                         break;
@@ -501,7 +487,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             case "type":
                 InputController.TypeText(
                     RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction),
-                    OptionalInt(action, "interval_ms", 0),
+                    OptionalInt(action, "interval_ms", InputTimingPolicy.MinimumTypingIntervalMilliseconds),
                     checkOperation);
                 return 0;
             case "key":
@@ -550,7 +536,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             ElapsedMicroseconds(startTimestamp),
             type == "wait" ? SafeInteger(action, "ms") : null,
             type == "type" ? SafeString(action, "text")?.Length : null,
-            type == "type" ? SafeInteger(action, "interval_ms") ?? 0 : null,
+            type == "type" ? SafeInteger(action, "interval_ms") ?? InputTimingPolicy.MinimumTypingIntervalMilliseconds : null,
             pointerPacingMilliseconds > 0 ? pointerPacingMilliseconds : null);
     }
 

@@ -191,15 +191,15 @@ function Convert-ElementToAction([Windows.Automation.AutomationElement]$Element,
 function New-FixtureActions([object]$Manifest) {
     if ($FixtureId -eq 'form-tab-v1') {
         return @(
-            [ordered]@{ type = 'type'; text = 'Ada'; interval_ms = 0 },
+            [ordered]@{ type = 'type'; text = 'Ada'; interval_ms = 5 },
             [ordered]@{ type = 'key'; keys = 'TAB' },
-            [ordered]@{ type = 'type'; text = 'Lovelace'; interval_ms = 0 },
+            [ordered]@{ type = 'type'; text = 'Lovelace'; interval_ms = 5 },
             [ordered]@{ type = 'key'; keys = 'TAB' },
-            [ordered]@{ type = 'type'; text = 'Performance'; interval_ms = 0 },
+            [ordered]@{ type = 'type'; text = 'Performance'; interval_ms = 5 },
             [ordered]@{ type = 'key'; keys = 'TAB' },
-            [ordered]@{ type = 'type'; text = 'RPU-2048'; interval_ms = 0 },
+            [ordered]@{ type = 'type'; text = 'RPU-2048'; interval_ms = 5 },
             [ordered]@{ type = 'key'; keys = 'TAB' },
-            [ordered]@{ type = 'type'; text = 'latency'; interval_ms = 0 },
+            [ordered]@{ type = 'type'; text = 'latency'; interval_ms = 5 },
             [ordered]@{ type = 'key'; keys = 'TAB' },
             [ordered]@{ type = 'key'; keys = 'ENTER' }
         )

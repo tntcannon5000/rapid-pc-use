@@ -88,34 +88,10 @@ internal sealed class InputController
         }
     }
 
-    internal static void AssertPointerAvailable()
-    {
-        Marshal.SetLastPInvokeError(0);
-        if (!NativeMethods.GetCursorPos(out var currentPosition))
-        {
-            throw new DesktopInputUnavailableException(
-                Marshal.GetLastPInvokeError(),
-                "Windows did not expose the current native cursor position on the interactive desktop.");
-        }
-
-        // Setting the cursor to its existing position is a side-effect-free capability
-        // check. In particular, Windows returns false here while another component has
-        // blocked synthetic input, even though SendInput can misleadingly report that it
-        // accepted an event which the desktop then discards.
-        Marshal.SetLastPInvokeError(0);
-        if (!NativeMethods.SetCursorPos(currentPosition.X, currentPosition.Y))
-        {
-            throw new DesktopInputUnavailableException(
-                Marshal.GetLastPInvokeError(),
-                "Windows is currently rejecting synthetic pointer input on the interactive desktop.");
-        }
-    }
-
     internal static void RelativeMove(int x, int y)
     {
         try
         {
-            AssertPointerAvailable();
             _ = NativeMethods.GetCursorPos(out var before);
             SendMouse(NativeMethods.MouseeventfMove, 0, x, y);
             if ((x != 0 || y != 0) && CanMoveFrom(before, x, y))
@@ -176,7 +152,6 @@ internal sealed class InputController
                 var (flag, data) = MouseButtonInput(canonical, down: true);
                 try
                 {
-                    AssertPointerAvailable();
                     SendMouse(flag, data);
                 }
                 catch (Exception exception)
@@ -275,7 +250,6 @@ internal sealed class InputController
         {
             try
             {
-                AssertPointerAvailable();
                 SendMouse(NativeMethods.MouseeventfWheel, unchecked((uint)(-verticalTicks * NativeMethods.WheelDelta)));
             }
             catch (Exception exception)
@@ -288,7 +262,6 @@ internal sealed class InputController
         {
             try
             {
-                AssertPointerAvailable();
                 SendMouse(NativeMethods.MouseeventfHwheel, unchecked((uint)(horizontalTicks * NativeMethods.WheelDelta)));
             }
             catch (Exception exception)
