@@ -1,9 +1,14 @@
 using System.Text.Json;
+using System.Buffers;
 
 namespace RapidPcUse.Agent.Providers;
 
 internal static class OpenAiDecisionSchema
 {
+    private static readonly JsonElement StructuredOutput = BuildStructuredOutput();
+
+    internal static JsonElement StructuredOutputElement => StructuredOutput;
+
     // App-server structured output uses one stable object shape. Irrelevant fields
     // remain empty, which avoids conditional-schema support differences between models.
     internal static void WriteStructuredOutput(Utf8JsonWriter writer)
@@ -90,6 +95,18 @@ internal static class OpenAiDecisionSchema
             "step_id");
         writer.WriteBoolean("additionalProperties", false);
         writer.WriteEndObject();
+    }
+
+    private static JsonElement BuildStructuredOutput()
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            WriteStructuredOutput(writer);
+        }
+
+        using var document = JsonDocument.Parse(buffer.WrittenMemory);
+        return document.RootElement.Clone();
     }
 
     internal static void WriteTools(Utf8JsonWriter writer)
@@ -337,7 +354,10 @@ internal static class OpenAiDecisionSchema
                 writer.WriteNumber("maxLength", SecurityLimits.MaxTypedCodeUnitsPerAction);
                 break;
             case "type_interval":
-                IntegerRange(writer, 0, SecurityLimits.MaxTypeIntervalMilliseconds);
+                IntegerRange(
+                    writer,
+                    InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+                    SecurityLimits.MaxTypeIntervalMilliseconds);
                 break;
             case "keys":
                 writer.WriteString("type", "string");

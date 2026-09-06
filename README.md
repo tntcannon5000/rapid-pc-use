@@ -78,6 +78,8 @@ The capture backend is isolated behind the host boundary and uses parallel GDI c
 - The native Win32 overlay is click-through and topmost. Windows is asked to exclude it from screenshots; a privacy-safe warning is recorded if that OS capability is unavailable.
 - A `WH_KEYBOARD_LL` hook reacts only to physical Escape, not driver-injected Escape.
 - Input uses `SetCursorPos` and `SendInput`; typed text is emitted as Unicode keystrokes, never clipboard paste.
+- Absolute pointer moves are read back before any button event, and ignored relative motion is detected whenever the cursor has room to move. Cursor clipping, rewriting, or suppression interrupts the batch instead of silently clicking the wrong pixel; pointer-stage diagnostics remain specific across moves, clicks, drags, button holds, and scrolling.
+- Native input is validated at the action that uses it rather than through a speculative pointer gate at control acquisition, so observation and keyboard-only work remain available. The executor enforces at least 80 ms between clicks and 5 ms between typed UTF-16 code units.
 - A current-user ownership lease prevents two driver processes from controlling the same desktop.
 - Recoverable request, frame, provider, progress, and partial-action conditions stay inside the visual loop. Only user takeover, an unavailable Windows security boundary, exhausted bounded recovery, or a broken driver transport ends control.
 - Pre-execution `PC_ACTION_REJECTED` responses are recoverable request corrections, not driver failures. They execute nothing and do not release control.
@@ -87,7 +89,7 @@ ChatGPT Work in the desktop app can use the local plugin. Hosted ChatGPT Work on
 
 ## Internal model provider
 
-The high-level loop is advertised automatically and uses `gpt-5.6-luna`, low reasoning, and Codex fast mode by default. A persistent Codex app-server child is warmed in the background and reuses the user's saved ChatGPT sign-in; Codex owns and refreshes the session, while Rapid PC Use never reads, copies, or receives OAuth credentials. The optional direct OpenAI provider remains available for explicit Platform API-key configurations.
+The high-level loop is advertised automatically and uses `gpt-5.6-sol`, medium reasoning, and Codex fast mode by default. A persistent Codex app-server child is warmed in the background and reuses the user's saved ChatGPT sign-in; Codex owns and refreshes the session, while Rapid PC Use never reads, copies, or receives OAuth credentials. The optional direct OpenAI provider remains available for explicit Platform API-key configurations.
 
 Every visual decision uses a fresh ephemeral Codex thread containing the stable controller instructions and schema, a maximum 2 KB structured working state, the last three bounded action outcomes, and only the current screenshot for each captured surface. The first empty thread is prepared during background startup without task text or screenshots. Screenshot files are deleted after the turn and the persistent app-server process is recycled after a bounded number of turns. Previous screenshots therefore never accumulate in the next model decision's context. Paused sessions retain no screenshot.
 
@@ -99,8 +101,8 @@ Configuration is read once when the driver starts:
 | --- | --- |
 | `RAPID_PC_AGENT_ENABLED` | Automatic for the Codex-session provider; set `0` to force the low-level route. |
 | `RAPID_PC_AGENT_PROVIDER` | `codex` (`openai` remains available for explicit API-key use) |
-| `RAPID_PC_AGENT_MODEL` | `gpt-5.6-luna` |
-| `RAPID_PC_AGENT_REASONING` | `low` |
+| `RAPID_PC_AGENT_MODEL` | `gpt-5.6-sol` |
+| `RAPID_PC_AGENT_REASONING` | `medium` |
 | `RAPID_PC_AGENT_SERVICE_TIER` | `fast` |
 | `RAPID_PC_AGENT_MAX_TURNS` | `48` |
 | `RAPID_PC_AGENT_MAX_ACTIONS` | `96` |
@@ -151,7 +153,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for change guidelines and [`docs/RELEASING.md`](./docs/RELEASING.md) for the maintainer release checklist.
 
-Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, knowledge retrieval, runbook dispatch/readiness, terminal route-learning persistence, decision routing, token/cache counters, progress signals, and aggregate run timing. `scripts/profile.ps1` projects local retrieval, runbook execution, and terminal route learning as separate totals. Messages, task text, model prose, state text, retrieved content, runbook keys/targets/results, stack traces, arbitrary exception data, screenshots, image hashes, typed content, literal key values, window titles, and credentials are omitted. The log rotates at 4 MB with three retained archives.
+Structured JSONL diagnostics are written continuously to `%LOCALAPPDATA%\RapidPcUse\rapid-pc-use.log`. Entries include session and operation IDs; response-to-request loop gaps; request and response sizes; per-action timings; settle timing; capture, resize, and JPEG stage timing; encoded dimensions and bytes; conservative cumulative image-patch context estimates; exception types; and numeric native error codes. High-level runs additionally report provider/model identifiers, image staging, connection acquisition, thread setup, payload construction, response headers/first event/first decision delta/decision completion, parse, policy, action, adaptive settle, capture, completion guard, knowledge retrieval, runbook dispatch/readiness, terminal route-learning persistence, decision routing, token/cache counters, progress signals, and aggregate run timing. Failed model attempts identify the bounded provider stage, a safe reason code, retry decision, latency, exception type, and HRESULT. `scripts/profile.ps1` projects local retrieval, runbook execution, and terminal route learning as separate totals. Messages, task text, model prose, state text, retrieved content, runbook keys/targets/results, stack traces, arbitrary exception data, exception messages, screenshots, image hashes, typed content, literal key values, window titles, credentials, and provider response bodies are omitted. The log rotates at 4 MB with three retained archives.
 
 Profile the latest driver session with:
 

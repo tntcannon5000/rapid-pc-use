@@ -37,6 +37,10 @@ internal static class SecurityLimits
     internal const int MaxAgentProviderArgumentsCharacters = 200_000;
     internal const int MaxAgentProviderErrorBytes = 16_384;
     internal const int MaxAgentOutputTokens = 1_024;
+    internal const int MaxAgentBrokerRequestBytes = 24_000_000;
+    internal const int MaxAgentBrokerResponseCharacters = 2_000_000;
+    internal const int MaxAgentBrokerPipeNameCharacters = 128;
+    internal const int MaxAgentBrokerTokenCharacters = 256;
     internal const int MaxAgentConfirmationSummaryCharacters = 600;
     internal const int MaxAgentHandoffRequestCharacters = 600;
     internal const int MaxAgentOuterContextCharacters = 1_200;

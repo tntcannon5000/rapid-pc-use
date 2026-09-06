@@ -986,7 +986,10 @@ internal static class RunbookFeatureTests
         var update = JsonSerializer.SerializeToElement(definitions)
             .EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "pc_runbook_update");
-        var variants = update.GetProperty("inputSchema").GetProperty("oneOf");
+        var inputSchema = update.GetProperty("inputSchema");
+        Assert(inputSchema.GetProperty("type").GetString() == "object",
+            "runbook update schema is not an MCP-compatible object root");
+        var variants = inputSchema.GetProperty("oneOf");
         Assert(variants.GetArrayLength() == 2, "runbook update schema does not discriminate upsert and forget");
         var upsert = variants.EnumerateArray().Single(variant =>
             variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "upsert");
@@ -1098,8 +1101,8 @@ internal static class RunbookFeatureTests
     private static PcAgentOptions Options() => new(
         Enabled: true,
         Provider: "openai",
-        Model: "gpt-5.6-luna",
-        ReasoningEffort: "low",
+        Model: "gpt-5.6-sol",
+        ReasoningEffort: "medium",
         ServiceTier: "fast",
         MaxModelTurns: 48,
         MaxActions: 96,

@@ -18,6 +18,22 @@ internal sealed class InputController
 
     internal static void Move(MonitorDescriptor monitor, int x, int y)
     {
+        try
+        {
+            MoveCore(monitor, x, y);
+        }
+        catch (NativeInputStageException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new NativeInputStageException("pointer_move", exception);
+        }
+    }
+
+    private static void MoveCore(MonitorDescriptor monitor, int x, int y)
+    {
         var (screenX, screenY) = MapNormalizedPoint(monitor, x, y);
         if (!NativeMethods.SetCursorPos(screenX, screenY))
         {
@@ -41,13 +57,65 @@ internal sealed class InputController
             exception.Data["virtual_desktop_top"] = NativeMethods.GetSystemMetrics(NativeMethods.SmYVirtualScreen);
             exception.Data["virtual_desktop_width"] = NativeMethods.GetSystemMetrics(NativeMethods.SmCxVirtualScreen);
             exception.Data["virtual_desktop_height"] = NativeMethods.GetSystemMetrics(NativeMethods.SmCyVirtualScreen);
+            var virtualRight = (int)exception.Data["virtual_desktop_left"]! + (int)exception.Data["virtual_desktop_width"]!;
+            var virtualBottom = (int)exception.Data["virtual_desktop_top"]! + (int)exception.Data["virtual_desktop_height"]!;
+            exception.Data["target_within_virtual_desktop"] =
+                screenX >= (int)exception.Data["virtual_desktop_left"]! && screenX < virtualRight &&
+                screenY >= (int)exception.Data["virtual_desktop_top"]! && screenY < virtualBottom;
+            throw exception;
+        }
+
+        if (!NativeMethods.GetCursorPos(out var finalPosition))
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Windows did not report the cursor position after a native pointer move.");
+        }
+
+        if (finalPosition.X != screenX || finalPosition.Y != screenY)
+        {
+            var exception = new Win32Exception(
+                0,
+                $"Windows reported native cursor pixel ({finalPosition.X}, {finalPosition.Y}) after a request for ({screenX}, {screenY}) on {monitor.DeviceName}.");
+            exception.Data["display_id"] = monitor.Id;
+            exception.Data["display_device"] = monitor.DeviceName;
+            exception.Data["normalized_x"] = x;
+            exception.Data["normalized_y"] = y;
+            exception.Data["target_pixel_x"] = screenX;
+            exception.Data["target_pixel_y"] = screenY;
+            exception.Data["cursor_after_pixel_x"] = finalPosition.X;
+            exception.Data["cursor_after_pixel_y"] = finalPosition.Y;
+            exception.Data["target_within_virtual_desktop"] = true;
             throw exception;
         }
     }
 
     internal static void RelativeMove(int x, int y)
     {
-        SendMouse(NativeMethods.MouseeventfMove, 0, x, y);
+        try
+        {
+            _ = NativeMethods.GetCursorPos(out var before);
+            SendMouse(NativeMethods.MouseeventfMove, 0, x, y);
+            if ((x != 0 || y != 0) && CanMoveFrom(before, x, y))
+            {
+                if (!NativeMethods.GetCursorPos(out var after))
+                {
+                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "Windows did not report the cursor position after a relative pointer event.");
+                }
+
+                if (after.X == before.X && after.Y == before.Y)
+                {
+                    var exception = new Win32Exception(0, "Windows accepted a relative pointer event but the native cursor did not move.");
+                    exception.Data["relative_x"] = x;
+                    exception.Data["relative_y"] = y;
+                    exception.Data["cursor_before_pixel_x"] = before.X;
+                    exception.Data["cursor_before_pixel_y"] = before.Y;
+                    throw exception;
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            throw new NativeInputStageException("pointer_move", exception);
+        }
     }
 
     internal int Click(
@@ -59,12 +127,15 @@ internal sealed class InputController
         Action checkOperation)
     {
         Move(monitor, x, y);
+
         var pacingMilliseconds = 0;
         for (var index = 0; index < count; index++)
         {
             pacingMilliseconds += _clickPacer.BeforeClick(checkOperation);
             MouseDown(button);
+
             MouseUp(button);
+
             _clickPacer.MarkReleased();
         }
 
@@ -79,7 +150,15 @@ internal sealed class InputController
             if (!_heldButtons.Contains(canonical))
             {
                 var (flag, data) = MouseButtonInput(canonical, down: true);
-                SendMouse(flag, data);
+                try
+                {
+                    SendMouse(flag, data);
+                }
+                catch (Exception exception)
+                {
+                    throw new NativeInputStageException("button_down", exception);
+                }
+
                 _heldButtons.Add(canonical);
             }
         }
@@ -93,7 +172,15 @@ internal sealed class InputController
             if (_heldButtons.Contains(canonical))
             {
                 var (flag, data) = MouseButtonInput(canonical, down: false);
-                SendMouse(flag, data);
+                try
+                {
+                    SendMouse(flag, data);
+                }
+                catch (Exception exception)
+                {
+                    throw new NativeInputStageException("button_up", exception);
+                }
+
                 _heldButtons.Remove(canonical);
             }
         }
@@ -161,12 +248,26 @@ internal sealed class InputController
 
         if (verticalTicks != 0)
         {
-            SendMouse(NativeMethods.MouseeventfWheel, unchecked((uint)(-verticalTicks * NativeMethods.WheelDelta)));
+            try
+            {
+                SendMouse(NativeMethods.MouseeventfWheel, unchecked((uint)(-verticalTicks * NativeMethods.WheelDelta)));
+            }
+            catch (Exception exception)
+            {
+                throw new NativeInputStageException("pointer_scroll", exception);
+            }
         }
 
         if (horizontalTicks != 0)
         {
-            SendMouse(NativeMethods.MouseeventfHwheel, unchecked((uint)(horizontalTicks * NativeMethods.WheelDelta)));
+            try
+            {
+                SendMouse(NativeMethods.MouseeventfHwheel, unchecked((uint)(horizontalTicks * NativeMethods.WheelDelta)));
+            }
+            catch (Exception exception)
+            {
+                throw new NativeInputStageException("pointer_scroll", exception);
+            }
         }
     }
 
@@ -355,6 +456,18 @@ internal sealed class InputController
         var localX = (int)Math.Round(x * (monitor.Width - 1d) / 1000d);
         var localY = (int)Math.Round(y * (monitor.Height - 1d) / 1000d);
         return (monitor.Left + localX, monitor.Top + localY);
+    }
+
+    private static bool CanMoveFrom(NativeMethods.Point position, int x, int y)
+    {
+        var left = NativeMethods.GetSystemMetrics(NativeMethods.SmXVirtualScreen);
+        var top = NativeMethods.GetSystemMetrics(NativeMethods.SmYVirtualScreen);
+        var right = left + NativeMethods.GetSystemMetrics(NativeMethods.SmCxVirtualScreen) - 1;
+        var bottom = top + NativeMethods.GetSystemMetrics(NativeMethods.SmCyVirtualScreen) - 1;
+        return (x < 0 && position.X > left) ||
+            (x > 0 && position.X < right) ||
+            (y < 0 && position.Y > top) ||
+            (y > 0 && position.Y < bottom);
     }
 
     internal static void ValidateChord(string chord)

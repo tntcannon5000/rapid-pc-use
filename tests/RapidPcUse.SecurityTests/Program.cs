@@ -94,9 +94,12 @@ static void ProtocolReaderIsBounded()
 static void ActionBatchesAreBounded()
 {
     using var valid = JsonDocument.Parse("""
-        [{"type":"type","text":"hello","interval_ms":2},{"type":"wait","ms":20}]
+        [{"type":"type","text":"hello","interval_ms":5},{"type":"wait","ms":20}]
         """);
     DesktopController.ValidateActionPlan(valid.RootElement, 35);
+
+    using var tooFastTyping = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"hello\",\"interval_ms\":4}]");
+    Expect<PcActionPlanValidationException>(() => DesktopController.ValidateActionPlan(tooFastTyping.RootElement, 0));
 
     using var tooLong = JsonDocument.Parse($"[{{\"type\":\"type\",\"text\":\"{new string('x', SecurityLimits.MaxTypedCodeUnitsPerAction + 1)}\"}}]");
     Expect<ArgumentException>(() => DesktopController.ValidateActionPlan(tooLong.RootElement, 0));

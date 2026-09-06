@@ -128,4 +128,18 @@ try {
 catch { $leakCaught = $true }
 Assert-Test $leakCaught 'Artifact privacy guard did not reject a private configuration value.'
 
+$configuredStartInfo = New-RapidPcBenchmarkDriverStartInfo `
+    -ExecutablePath (Join-Path $env:SystemRoot 'System32\where.exe') `
+    -Model 'gpt-5.6-sol' `
+    -Reasoning 'medium' `
+    -ServiceTier 'fast' `
+    -CaptureTier '900' `
+    -MaxDurationMs 287654
+Assert-Test ($configuredStartInfo.Environment['RAPID_PC_AGENT_MAX_DURATION_MS'] -eq '287654') `
+    'The real-world request ceiling was not propagated to the driver process.'
+Assert-Test ($configuredStartInfo.Environment['RAPID_PC_AGENT_MODEL'] -eq 'gpt-5.6-sol') `
+    'The selected real-world model was not propagated to the driver process.'
+Assert-Test ($configuredStartInfo.Environment['RAPID_PC_AGENT_REASONING'] -eq 'medium') `
+    'The selected reasoning level was not propagated to the driver process.'
+
 Write-Host 'Real-world benchmark dry-run contract tests passed.'

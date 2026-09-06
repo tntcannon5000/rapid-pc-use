@@ -36,13 +36,13 @@ internal sealed class ControlSession : IDisposable
         }
     }
 
-    internal void Start()
+    internal bool Start()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_state.IsActive)
         {
             _state.Touch();
-            return;
+            return false;
         }
 
         lock (_leaseGate)
@@ -50,7 +50,7 @@ internal sealed class ControlSession : IDisposable
             if (_state.IsActive)
             {
                 _state.Touch();
-                return;
+                return false;
             }
 
             var leasePath = Path.Combine(Path.GetTempPath(), "rapid-pc-use.control.lock");
@@ -60,7 +60,7 @@ internal sealed class ControlSession : IDisposable
             }
             catch (IOException exception)
             {
-                throw new InvalidOperationException("Another Rapid PC Use session already controls this Windows desktop.", exception);
+                throw new ControlSessionBusyException(exception);
             }
 
             try
@@ -79,6 +79,7 @@ internal sealed class ControlSession : IDisposable
         }
 
         DriverLog.Info("control.acquired", "Native mouse and keyboard control was acquired and the user takeover cue is visible.");
+        return true;
     }
 
     internal void Touch() => _state.Touch();
@@ -235,3 +236,6 @@ internal sealed class ControlSession : IDisposable
         return source;
     }
 }
+
+internal sealed class ControlSessionBusyException(Exception innerException)
+    : InvalidOperationException("Another Rapid PC Use session already controls this Windows desktop.", innerException);

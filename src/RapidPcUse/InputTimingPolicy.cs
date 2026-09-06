@@ -5,6 +5,7 @@ namespace RapidPcUse;
 internal static class InputTimingPolicy
 {
     internal const int MinimumInterClickMilliseconds = 80;
+    internal const int MinimumTypingIntervalMilliseconds = 5;
 }
 
 internal sealed class PointerClickPacer

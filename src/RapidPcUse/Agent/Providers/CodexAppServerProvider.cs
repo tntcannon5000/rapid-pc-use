@@ -64,6 +64,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             }
 
             var started = Stopwatch.GetTimestamp();
+            var stage = "image_stage";
             var frameDirectory = CreateFrameDirectory();
             try
             {
@@ -72,18 +73,22 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                     request.Observation.Frames,
                     cancellationToken).ConfigureAwait(false);
                 var framesStaged = Stopwatch.GetTimestamp();
+                stage = "connection_acquire";
                 var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
                 var connectionReady = Stopwatch.GetTimestamp();
                 var threadId = _preparedThreadId;
                 _preparedThreadId = null;
                 if (threadId is null)
                 {
+                    stage = "thread_start";
                     threadId = await StartThreadAsync(connection, cancellationToken).ConfigureAwait(false);
                 }
 
                 var threadReady = Stopwatch.GetTimestamp();
+                stage = "payload_build";
                 var turnRequest = BuildTurnStartRequest(connection.NextId(), threadId, request, imagePaths);
                 var requestBuilt = Stopwatch.GetTimestamp();
+                stage = "turn_wait";
                 var result = await connection.RunTurnAsync(
                     turnRequest,
                     threadId,
@@ -92,6 +97,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                     cancellationToken).ConfigureAwait(false);
                 _successfulTurns++;
 
+                stage = "decision_parse";
                 var parseStarted = Stopwatch.GetTimestamp();
                 var decision = PcAgentDecisionParser.ParseStructured(result.Output);
                 var parseCompleted = Stopwatch.GetTimestamp();
@@ -111,10 +117,15 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                     result.Timings,
                     result.Usage);
             }
-            catch
+            catch (OperationCanceledException)
             {
                 ResetConnection();
                 throw;
+            }
+            catch (Exception exception)
+            {
+                ResetConnection();
+                throw PcModelProviderStageException.Wrap(stage, exception);
             }
             finally
             {
@@ -262,7 +273,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             id.ValueKind != JsonValueKind.String ||
             string.IsNullOrWhiteSpace(id.GetString()))
         {
-            throw new InvalidOperationException("Codex app-server did not create an ephemeral decision thread.");
+            throw new CodexAppServerException("thread_create_invalid", "Codex app-server did not create an ephemeral decision thread.");
         }
 
         return id.GetString()!;
@@ -373,7 +384,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             _process = new Process { StartInfo = startInfo };
             if (!_process.Start())
             {
-                throw new InvalidOperationException("Codex app-server could not be started.");
+                throw new CodexAppServerException("process_start_failed", "Codex app-server could not be started.");
             }
 
             _input = _process.StandardInput;
@@ -416,14 +427,14 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             var accountResult = await RequestAsync(accountRequest, cancellationToken).ConfigureAwait(false);
             if (!accountResult.TryGetProperty("account", out var account) || account.ValueKind == JsonValueKind.Null)
             {
-                throw new InvalidOperationException("Codex is not signed in with ChatGPT.");
+                throw new CodexAppServerException("chatgpt_sign_in_missing", "Codex is not signed in with ChatGPT.");
             }
 
             if (account.TryGetProperty("type", out var type) &&
                 type.ValueKind == JsonValueKind.String &&
                 string.Equals(type.GetString(), "apiKey", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException("The PC agent requires Codex ChatGPT-session authentication, not an API key.");
+                throw new CodexAppServerException("chatgpt_auth_required", "The PC agent requires Codex ChatGPT-session authentication, not an API key.");
             }
         }
 
@@ -478,7 +489,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                         !turn.TryGetProperty("id", out var id) ||
                         id.ValueKind != JsonValueKind.String)
                     {
-                        throw new InvalidOperationException("Codex app-server did not start the decision turn.");
+                        throw new CodexAppServerException("turn_start_invalid", "Codex app-server did not start the decision turn.");
                     }
 
                     turnId = id.GetString();
@@ -531,7 +542,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                         EnsureCompleted(parameters);
                         if (string.IsNullOrWhiteSpace(output))
                         {
-                            throw new InvalidOperationException("Codex app-server completed without a structured decision.");
+                            throw new CodexAppServerException("decision_missing", "Codex app-server completed without a structured decision.");
                         }
 
                         var completed = Stopwatch.GetTimestamp();
@@ -586,7 +597,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             cancellationToken.ThrowIfCancellationRequested();
             if (message.Length > SecurityLimits.MaxAgentProviderResponseBytes)
             {
-                throw new InvalidOperationException("The Codex app-server request exceeded its configured size limit.");
+                throw new CodexAppServerException("request_oversized", "The Codex app-server request exceeded its configured size limit.");
             }
 
             await _input.WriteLineAsync(Encoding.UTF8.GetString(message).AsMemory(), cancellationToken).ConfigureAwait(false);
@@ -598,12 +609,12 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             var line = await _output.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (line is null)
             {
-                throw new IOException("Codex app-server closed its response stream.");
+                throw new CodexAppServerException("response_stream_closed", "Codex app-server closed its response stream.");
             }
 
             if (Encoding.UTF8.GetByteCount(line) > SecurityLimits.MaxAgentProviderResponseBytes)
             {
-                throw new InvalidOperationException("A Codex app-server message exceeded its configured size limit.");
+                throw new CodexAppServerException("response_oversized", "A Codex app-server message exceeded its configured size limit.");
             }
 
             return JsonDocument.Parse(line, new JsonDocumentOptions
@@ -625,12 +636,12 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
         {
             if (response.TryGetProperty("error", out _))
             {
-                throw new InvalidOperationException("Codex app-server rejected a protocol request.");
+                throw new CodexAppServerException("protocol_request_rejected", "Codex app-server rejected a protocol request.");
             }
 
             if (!response.TryGetProperty("result", out var result))
             {
-                throw new InvalidOperationException("Codex app-server returned an invalid protocol response.");
+                throw new CodexAppServerException("protocol_response_invalid", "Codex app-server returned an invalid protocol response.");
             }
 
             return result.Clone();
@@ -664,7 +675,7 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
             if (!parameters.TryGetProperty("turn", out var turn) ||
                 !turn.TryGetProperty("status", out var status))
             {
-                throw new InvalidOperationException("Codex app-server returned an invalid turn completion.");
+                throw new CodexAppServerException("turn_completion_invalid", "Codex app-server returned an invalid turn completion.");
             }
 
             if (status.GetString() != "completed")
@@ -677,7 +688,8 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
                     detail = detail[..Math.Min(detail.Length, 300)];
                 }
 
-                throw new InvalidOperationException(
+                throw new CodexAppServerException(
+                    "turn_not_completed",
                     $"Codex app-server decision turn ended as '{status.GetString()}'. {detail}".TrimEnd());
             }
         }
@@ -721,6 +733,12 @@ internal sealed class CodexAppServerProvider : IPcModelProvider, IWarmablePcMode
         private static long ElapsedMicroseconds(long start, long end)
             => (long)(Stopwatch.GetElapsedTime(start, end).TotalMilliseconds * 1000);
     }
+}
+
+internal sealed class CodexAppServerException(string reasonCode, string message)
+    : InvalidOperationException(message)
+{
+    internal string ReasonCode { get; } = reasonCode;
 }
 
 internal static class CodexExecutableLocator

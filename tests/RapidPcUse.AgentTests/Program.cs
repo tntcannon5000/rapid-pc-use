@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -45,25 +46,39 @@ if (args is ["--spawn-child-probe", var dotnetHost, var pidPath, var lockPathFor
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("agent defaults use Sol with medium reasoning", AgentDefaultsUseSolMedium),
     ("Codex-session provider is keyless, ephemeral, and current-frame only", CodexSessionRequestIsBounded),
     ("Codex-session provider completes a live keyless protocol turn when requested", CodexSessionLiveTurn),
     ("OpenAI requests are stateless and current-frame only", OpenAiRequestIsBounded),
     ("OpenAI requests apply the configured service tier", OpenAiRequestUsesConfiguredServiceTier),
     ("OpenAI streaming returns one strict decision", OpenAiStreamingDecisionParses),
+    ("broker provider authenticates one bounded structured decision", BrokerProviderReturnsStructuredDecision),
+    ("broker provider rejects a mismatched response identity", BrokerProviderRejectsMismatchedIdentity),
     ("provider failures do not expose response bodies", ProviderFailureIsRedacted),
+    ("provider failure diagnostics identify a safe stage and reason", ProviderFailureDiagnosticsAreSafe),
     ("truncated provider streams fail closed", TruncatedProviderStreamFailsClosed),
     ("agent loop completes through replay provider", ReplayLoopCompletes),
     ("local completion guard eliminates the final model barrier", CompletionGuardEliminatesFinalModelBarrier),
     ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
+    ("MCP pc_run accepts real Windows process names with spaces", McpRunAcceptsSpacedProcessNames),
+    ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
+    ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
+    ("cross-host contention cannot replay a paused continuation", McpResumeReportsControlBusyAsNonReplayable),
+    ("blocked native input fails before the model and releases control", McpRunReportsInputUnavailableWithoutFailure),
+    ("blocked input cannot replay a paused continuation", McpResumeReportsInputUnavailableAsNonReplayable),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
+    ("MCP pc_act preserves recoverable partial-action interruption", McpActInterruptionIsRecoverable),
     ("agent loop corrects a rejected action without releasing control", AgentLoopCorrectsRejectedAction),
     ("stale frames refresh without terminating low-level control", StaleFrameRefreshes),
     ("provider faults retry inside the high-level loop", ProviderFaultRetries),
+    ("provider exhaustion reports a completed direct launch", ProviderExhaustionReportsCompletedLaunch),
     ("partial native execution replans from a fresh screenshot", PartialExecutionRecovers),
+    ("repeated native pointer suppression blocks without wasting model turns", RepeatedPointerSuppressionBlocks),
+    ("MCP pc_run preserves terminal native pointer diagnostics", McpRunPreservesPointerFailureCode),
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
     ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
     ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
@@ -127,6 +142,48 @@ foreach (var failure in failures)
 var exitCode = failures.Count == 0 ? 0 : 1;
 DriverLog.FlushAndStop(TimeSpan.FromSeconds(2));
 return exitCode;
+
+static Task AgentDefaultsUseSolMedium()
+{
+    var names = new[] { "RAPID_PC_AGENT_MODEL", "RAPID_PC_AGENT_REASONING" };
+    var previous = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+    try
+    {
+        foreach (var name in names)
+        {
+            Environment.SetEnvironmentVariable(name, null);
+        }
+
+        var options = PcAgentOptions.FromEnvironment();
+        Assert(options.Model == "gpt-5.6-sol", "the default inner model is not Sol");
+        Assert(options.ReasoningEffort == "medium", "the default inner reasoning effort is not medium");
+    }
+    finally
+    {
+        foreach (var pair in previous)
+        {
+            Environment.SetEnvironmentVariable(pair.Key, pair.Value);
+        }
+    }
+
+    return Task.CompletedTask;
+}
+
+static Task ProviderFailureDiagnosticsAreSafe()
+{
+    const string secret = "sensitive-provider-response";
+    var exception = PcModelProviderStageException.Wrap(
+        "turn_wait",
+        new CodexAppServerException("turn_not_completed", secret));
+    var failure = ProviderFailureDiagnostics.Capture(exception);
+    Assert(failure.Stage == "turn_wait", "provider diagnostics lost the failure stage");
+    Assert(failure.ReasonCode == "turn_not_completed", "provider diagnostics lost the safe reason code");
+    Assert(failure.ExceptionType.EndsWith(nameof(CodexAppServerException), StringComparison.Ordinal),
+        "provider diagnostics lost the root exception type");
+    Assert(!JsonSerializer.Serialize(failure).Contains(secret, StringComparison.Ordinal),
+        "provider diagnostics exposed the provider response");
+    return Task.CompletedTask;
+}
 
 static Task CodexSessionRequestIsBounded()
 {
@@ -273,6 +330,117 @@ static async Task OpenAiStreamingDecisionParses()
     Assert(result.Decision is FinishDecision { Summary: "Done" }, "finish decision was not parsed");
     Assert(result.Usage.InputTokens == 1200 && result.Usage.CachedInputTokens == 1024, "usage counters were not parsed");
     Assert(handler.RequestPayload is not null, "request payload was not captured");
+}
+
+static async Task BrokerProviderReturnsStructuredDecision()
+{
+    var pipeName = $"rapid-pc-use-test-{Guid.NewGuid():N}";
+    var token = new string('a', 64);
+    using var server = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    var serverTask = Task.Run(async () =>
+    {
+        await server.WaitForConnectionAsync();
+        using var reader = new StreamReader(server, new UTF8Encoding(false), leaveOpen: true);
+        using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        var line = await reader.ReadLineAsync() ?? throw new InvalidOperationException("Missing broker request.");
+        using var request = JsonDocument.Parse(line);
+        var root = request.RootElement;
+        Assert(root.GetProperty("protocolVersion").GetInt32() == 1, "broker protocol version should be explicit");
+        Assert(root.GetProperty("token").GetString() == token, "broker token should authenticate the request");
+        Assert(root.GetProperty("images").GetArrayLength() == 1, "broker request should contain only current images");
+        Assert(root.GetProperty("decisionSchema").GetProperty("additionalProperties").GetBoolean() == false,
+            "broker should carry the closed structured decision schema");
+        var requestId = root.GetProperty("requestId").GetString();
+        var response = JsonSerializer.Serialize(new
+        {
+            protocolVersion = 1,
+            requestId,
+            ok = true,
+            functionName = "computer_decide",
+            arguments = "{\"decision\":\"finish\",\"summary\":\"Done.\",\"memory\":\"\",\"visible_evidence\":\"Fixture complete.\"}",
+            provider = "codex",
+            model = "gpt-5.6-sol",
+            timings = new
+            {
+                attachmentMicroseconds = 10,
+                prepareMicroseconds = 20,
+                firstEventMicroseconds = 30,
+                firstDecisionMicroseconds = 40,
+                decisionCompleteMicroseconds = 50,
+            },
+            usage = new
+            {
+                inputTokens = 100,
+                cachedInputTokens = 80,
+                outputTokens = 20,
+                reasoningTokens = 5,
+            },
+        });
+        await writer.WriteLineAsync(response);
+    });
+
+    using var provider = new BrokeredModelProvider(Options() with
+    {
+        Provider = "broker",
+        Model = "gpt-5.6-sol",
+    }, pipeName, token);
+    var result = await provider.DecideAsync(
+        new PcModelTurnRequest(
+            "Complete fixture.",
+            Scope(),
+            AgentWorkingState.Empty,
+            [],
+            Observation(1, [1, 2, 3]),
+            1,
+            10,
+            null,
+            "broker-test"),
+        CancellationToken.None);
+    await serverTask;
+
+    Assert(result.Decision is FinishDecision, "broker response should parse through the shared decision parser");
+    Assert(result.Provider == "codex" && result.Model == "gpt-5.6-sol",
+        "broker should preserve the exact DSH provider route");
+    Assert(result.Usage.CachedInputTokens == 80, "broker should preserve cache usage telemetry");
+    Assert(result.LocalTimings.ImageStageMicroseconds == 10, "broker should preserve attachment timing");
+}
+
+static async Task BrokerProviderRejectsMismatchedIdentity()
+{
+    var pipeName = $"rapid-pc-use-test-{Guid.NewGuid():N}";
+    var token = new string('b', 64);
+    using var server = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    var serverTask = Task.Run(async () =>
+    {
+        await server.WaitForConnectionAsync();
+        using var reader = new StreamReader(server, new UTF8Encoding(false), leaveOpen: true);
+        using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        _ = await reader.ReadLineAsync();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            protocolVersion = 1,
+            requestId = "wrong-request",
+            ok = false,
+            errorCode = "fixture",
+        }));
+    });
+
+    using var provider = new BrokeredModelProvider(Options() with { Provider = "broker" }, pipeName, token);
+    await ExpectAsync<InvalidOperationException>(() => provider.DecideAsync(
+        new PcModelTurnRequest(
+            "Complete fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+        CancellationToken.None));
+    await serverTask;
 }
 
 static async Task ProviderFailureIsRedacted()
@@ -437,6 +605,174 @@ static Task McpRunNormalizesOversizedBudgets()
     return Task.CompletedTask;
 }
 
+static Task McpRunAcceptsSpacedProcessNames()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), AgentWorkingState.Empty, "Change", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Fixture completed.", AgentWorkingState.Empty, "Visible fixture"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new NamedWindowInspector("DeepSeek Harness Desktop"));
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"DeepSeek Harness Desktop\"]}}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
+        "a valid Windows process name with spaces did not complete");
+    Assert(desktop.ActionBatches.Count == 1, "matching spaced process scope blocked native input");
+    return Task.CompletedTask;
+}
+
+static Task McpRunRejectsInvalidArgumentsWithoutFailure()
+{
+    using var provider = new RecordingProvider([]);
+    using var desktop = new FakeDesktop([]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"C:\\\\untrusted.exe\"]}}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    Assert(!result.GetProperty("isError").GetBoolean(), "invalid outer arguments became a terminal MCP failure");
+    Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "request_rejected",
+        "invalid outer arguments did not return a recoverable rejection");
+    Assert(desktop.StopCount == 0 && desktop.ActionBatches.Count == 0,
+        "request rejection changed desktop control state");
+    Assert(provider.Requests.Count == 0, "request rejection reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpRunReportsControlBusyWithoutFailure()
+{
+    using var provider = new RecordingProvider([]);
+    using var desktop = new ControlBusyDesktop();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Inspect the harmless fixture.\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    var structured = result.GetProperty("structuredContent");
+    Assert(!result.GetProperty("isError").GetBoolean(), "desktop contention became a terminal MCP error");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "desktop contention did not return a bounded blocked result");
+    Assert(structured.GetProperty("code").GetString() == "desktop_control_busy", "desktop contention omitted its stable reason code");
+    Assert(structured.GetProperty("retryable").GetBoolean(), "desktop contention was not marked retryable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "desktop contention did not guarantee zero native input");
+    Assert(provider.Requests.Count == 0, "desktop contention reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpResumeReportsControlBusyAsNonReplayable()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
+    ]);
+    using var desktop = new ReacquireControlBusyDesktop(Observation(1, [1]));
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
+    var input = JsonSerializer.Serialize(new
+    {
+        jsonrpc = "2.0",
+        id = 1,
+        method = "tools/call",
+        @params = new
+        {
+            name = "pc_resume",
+            arguments = new
+            {
+                session_id = paused.SessionId,
+                confirmation_id = confirmation.ConfirmationId,
+                decision = "approve_once",
+            },
+        },
+    }) + "\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "contended continuation did not block");
+    Assert(structured.GetProperty("code").GetString() == "desktop_control_busy", "contended continuation lost its reason code");
+    Assert(!structured.GetProperty("retryable").GetBoolean(), "contended continuation was incorrectly replayable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "contended continuation did not guarantee zero new actions");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "contended continuation changed visible desktop state");
+    return Task.CompletedTask;
+}
+
+static Task McpRunReportsInputUnavailableWithoutFailure()
+{
+    using var provider = new RecordingProvider([]);
+    using var desktop = new InputUnavailableDesktop();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Inspect the harmless fixture.\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    var structured = result.GetProperty("structuredContent");
+    Assert(!result.GetProperty("isError").GetBoolean(), "blocked native input became a terminal MCP error");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "blocked native input did not return a bounded blocked result");
+    Assert(structured.GetProperty("code").GetString() == "desktop_input_blocked", "blocked native input omitted its stable reason code");
+    Assert(structured.GetProperty("retryable").GetBoolean(), "blocked native input was not marked retryable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "blocked native input did not guarantee zero native input");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "blocked native input did not guarantee unchanged desktop state");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "blocked native input did not report released control");
+    Assert(structured.GetProperty("native_error_code").GetInt32() == 0, "blocked native input omitted the native error code");
+    Assert(provider.Requests.Count == 0, "blocked native input reached the model provider");
+    return Task.CompletedTask;
+}
+
+static Task McpResumeReportsInputUnavailableAsNonReplayable()
+{
+    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
+    ]);
+    using var desktop = new ReacquireInputUnavailableDesktop(Observation(1, [1]));
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var paused = loop.Run(Request(maxNoProgress: 3));
+    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
+    var input = JsonSerializer.Serialize(new
+    {
+        jsonrpc = "2.0",
+        id = 1,
+        method = "tools/call",
+        @params = new
+        {
+            name = "pc_resume",
+            arguments = new
+            {
+                session_id = paused.SessionId,
+                confirmation_id = confirmation.ConfirmationId,
+                decision = "approve_once",
+            },
+        },
+    }) + "\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "failed continuation reacquisition did not block");
+    Assert(structured.GetProperty("code").GetString() == "desktop_input_blocked", "failed continuation reacquisition lost its reason code");
+    Assert(!structured.GetProperty("retryable").GetBoolean(), "failed continuation reacquisition was incorrectly replayable");
+    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "failed continuation reacquisition did not guarantee zero new actions");
+    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "failed continuation reacquisition changed visible desktop state");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "failed continuation reacquisition retained control");
+    return Task.CompletedTask;
+}
+
 static Task McpRunUsesTrustedFastStart()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0}]");
@@ -514,6 +850,29 @@ static Task McpActValidationIsRecoverable()
     return Task.CompletedTask;
 }
 
+static Task McpActInterruptionIsRecoverable()
+{
+    using var desktop = new FakeDesktop([Observation(2, [2])]);
+    desktop.InterruptNextAct(completedActions: 0);
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_act\",\"arguments\":{\"frame_id\":1,\"actions\":[{\"type\":\"wait\",\"ms\":0}],\"observe_after\":false}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, null, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var result = response.RootElement.GetProperty("result");
+    var structured = result.GetProperty("structuredContent");
+    Assert(!result.GetProperty("isError").GetBoolean(), "partial action interruption became a terminal MCP error");
+    Assert(structured.GetProperty("status").GetString() == "action_interrupted", "partial action interruption lost its recoverable status");
+    Assert(structured.GetProperty("completed_actions").GetInt32() == 0, "partial action interruption reported an incorrect completed prefix");
+    Assert(structured.GetProperty("failure_code").GetString() == "native_action_failed", "partial action interruption omitted its bounded failure code");
+    Assert(structured.GetProperty("control_active").GetBoolean(), "partial action interruption released control");
+    Assert(structured.GetProperty("frame_id").GetInt64() == 2, "partial action interruption omitted its fresh frame");
+    Assert(result.GetProperty("content").EnumerateArray().Any(item => item.GetProperty("type").GetString() == "image"),
+        "partial action interruption omitted its recovery screenshot");
+    Assert(desktop.StopCount == 0, "partial action interruption invoked failure cleanup");
+    return Task.CompletedTask;
+}
+
 static Task ScrollSchemasUseSharedLimits()
 {
     using var desktop = new FakeDesktop([]);
@@ -549,6 +908,17 @@ static Task ScrollSchemasUseSharedLimits()
         .GetProperty("x");
     Assert(publicClickX.GetProperty("minimum").GetInt32() == 0 && publicClickX.GetProperty("maximum").GetInt32() == 1000,
         "public click coordinates contradict native execution");
+    var publicTypeInterval = pcAct.GetProperty("inputSchema")
+        .GetProperty("properties")
+        .GetProperty("actions")
+        .GetProperty("items")
+        .GetProperty("oneOf")
+        .EnumerateArray()
+        .Single(schema => schema.GetProperty("properties").GetProperty("type").GetProperty("const").GetString() == "type")
+        .GetProperty("properties")
+        .GetProperty("interval_ms");
+    Assert(publicTypeInterval.GetProperty("minimum").GetInt32() == InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+        "public typing interval minimum drifted");
 
     var options = Options();
     using var provider = new OpenAiResponsesProvider("test-key", options, new HttpClient(new NeverSendHandler()));
@@ -575,6 +945,16 @@ static Task ScrollSchemasUseSharedLimits()
     var innerScroll = scrollAction.GetProperty("properties").GetProperty("scroll_y");
     Assert(innerScroll.GetProperty("minimum").GetInt32() == SecurityLimits.MinScrollDeltaPerAction, "inner scroll minimum drifted");
     Assert(innerScroll.GetProperty("maximum").GetInt32() == SecurityLimits.MaxScrollDeltaPerAction, "inner scroll maximum drifted");
+    var typeAction = computerAct.GetProperty("parameters")
+        .GetProperty("properties")
+        .GetProperty("actions")
+        .GetProperty("items")
+        .GetProperty("anyOf")
+        .EnumerateArray()
+        .Single(schema => schema.GetProperty("properties").GetProperty("type").GetProperty("enum")[0].GetString() == "type");
+    var innerTypeInterval = typeAction.GetProperty("properties").GetProperty("interval_ms");
+    Assert(innerTypeInterval.GetProperty("minimum").GetInt32() == InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+        "inner typing interval minimum drifted");
     Assert(DesktopController.ScrollTicks(591) == 6, "591 delta units should become six wheel ticks");
     return Task.CompletedTask;
 }
@@ -590,7 +970,9 @@ static Task McpKnowledgeUpdateSchemaMatchesHandler()
     var update = response.RootElement.GetProperty("result").GetProperty("tools")
         .EnumerateArray()
         .Single(tool => tool.GetProperty("name").GetString() == "pc_knowledge_update");
-    var variants = update.GetProperty("inputSchema").GetProperty("oneOf").EnumerateArray().ToArray();
+    var inputSchema = update.GetProperty("inputSchema");
+    Assert(inputSchema.GetProperty("type").GetString() == "object", "knowledge update schema is not an MCP-compatible object root");
+    var variants = inputSchema.GetProperty("oneOf").EnumerateArray().ToArray();
     Assert(variants.Length == 2, "knowledge update schema did not publish two operation variants");
     var upsert = variants.Single(variant =>
         variant.GetProperty("properties").GetProperty("operation").GetProperty("const").GetString() == "upsert");
@@ -698,6 +1080,22 @@ static Task ProviderFaultRetries()
     return Task.CompletedTask;
 }
 
+static Task ProviderExhaustionReportsCompletedLaunch()
+{
+    using var provider = new FlakyProvider(3);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
+    var launcher = new FakeLaunchCoordinator();
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector(), launcher: launcher);
+    var result = loop.Run(Request(maxNoProgress: 3) with { LaunchUri = "discord:" });
+    Assert(result.Status == PcAgentStatus.Blocked, "exhausted provider did not block safely");
+    Assert(result.Summary.Contains("opened successfully", StringComparison.Ordinal),
+        "provider failure concealed the successful direct launch");
+    Assert(result.ActionsExecuted == 0 && desktop.ActionBatches.Count == 0,
+        "provider failure incorrectly reported native input");
+    Assert(desktop.StopCount == 1, "provider exhaustion did not release desktop control");
+    return Task.CompletedTask;
+}
+
 static Task PartialExecutionRecovers()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0},{\"type\":\"wait\",\"ms\":0}]");
@@ -716,9 +1114,57 @@ static Task PartialExecutionRecovers()
     return Task.CompletedTask;
 }
 
+static Task RepeatedPointerSuppressionBlocks()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-0\",\"x\":500,\"y\":500}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new FinishDecision("Should not be reached.", state, "Target active"),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "pointer_move_failed");
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "pointer_move_failed");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    var result = loop.Run(Request(maxNoProgress: 3));
+    Assert(result.Status == PcAgentStatus.Blocked, "repeated pointer suppression did not block safely");
+    Assert(result.ModelTurns == 2, "repeated pointer suppression wasted additional model turns");
+    Assert(result.ActionsExecuted == 0, "suppressed pointer actions were counted as executed");
+    Assert(result.Summary.Contains("pointer", StringComparison.Ordinal), "pointer suppression returned an unactionable summary");
+    Assert(result.Code == "pointer_move_failed", "pointer suppression omitted its stable terminal code");
+    return Task.CompletedTask;
+}
+
+static Task McpRunPreservesPointerFailureCode()
+{
+    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-0\",\"x\":500,\"y\":500}]");
+    var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
+    using var provider = new ReplayPcModelProvider(
+    [
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+    ]);
+    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "button_down_failed");
+    desktop.InterruptNextAct(completedActions: 0, failureCode: "button_down_failed");
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\"}}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
+    Assert(structured.GetProperty("status").GetString() == "blocked", "terminal pointer failure did not remain blocked");
+    Assert(structured.GetProperty("code").GetString() == "button_down_failed", "terminal pointer failure code was lost at the MCP boundary");
+    Assert(structured.GetProperty("control_released").GetBoolean(), "terminal pointer failure did not report released control");
+    return Task.CompletedTask;
+}
+
 static Task ConfirmationPausesAndResumes()
 {
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":2}]");
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
     var state = new AgentWorkingState("Credential field visible", [], "Enter fixture", [], []);
     using var provider = new ReplayPcModelProvider(
     [
@@ -805,7 +1251,7 @@ static Task HandoffExpiryAndSchemaAreBounded()
 
 static Task HandoffClearsApprovedRisk()
 {
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":0}]");
+    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
     var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
     using var provider = new ReplayPcModelProvider(
     [
@@ -930,8 +1376,8 @@ static Task StateLimitsRejectImageData()
 static PcAgentOptions Options() => new(
     Enabled: true,
     Provider: "openai",
-    Model: "gpt-5.6-luna",
-    ReasoningEffort: "low",
+    Model: "gpt-5.6-sol",
+    ReasoningEffort: "medium",
     ServiceTier: "fast",
     MaxModelTurns: 48,
     MaxActions: 96,
@@ -1019,7 +1465,7 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
     private CancellationTokenSource _control = new();
     private bool _takeover;
     private bool _staleNextAct;
-    private int? _partialCompletedActions;
+    private readonly Queue<(int CompletedActions, string FailureCode)> _partialFailures = new();
 
     internal List<JsonElement> ActionBatches { get; } = [];
     internal int StopCount { get; private set; }
@@ -1062,15 +1508,15 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
             .Select((action, index) => new ActionTiming(index + 1, action.GetProperty("type").GetString()!, 0, null, null, null, null))
             .ToArray();
         var observation = _observations.Count == 0 ? null : _observations.Dequeue();
-        if (_partialCompletedActions is int completedActions)
+        if (_partialFailures.Count > 0)
         {
-            _partialCompletedActions = null;
+            var (completedActions, failureCode) = _partialFailures.Dequeue();
             return new DesktopActResult(
                 observation,
                 timing.Take(completedActions).ToArray(),
                 settleMilliseconds,
                 0,
-                new DesktopActionFailure(completedActions + 1, "wait", "Fixture action was interrupted.", completedActions));
+                new DesktopActionFailure(completedActions + 1, "wait", "Fixture action was interrupted.", completedActions, failureCode));
         }
 
         return new DesktopActResult(observation, timing, settleMilliseconds, 0);
@@ -1103,8 +1549,81 @@ internal sealed class FakeDesktop(IEnumerable<Observation> observations) : IPcDe
 
     internal void FailNextActAsStale() => _staleNextAct = true;
 
-    internal void InterruptNextAct(int completedActions) => _partialCompletedActions = completedActions;
+    internal void InterruptNextAct(int completedActions, string failureCode = "native_action_failed")
+        => _partialFailures.Enqueue((completedActions, failureCode));
 
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class ControlBusyDesktop : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl) => throw new ControlSessionBusyException(new IOException("fixture lease conflict"));
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The contention fixture cannot act.");
+    public void ThrowIfControlLost() => throw new InvalidOperationException("The contention fixture never acquired control.");
+    public void Stop() => _control.Cancel();
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class InputUnavailableDesktop : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl) => throw new DesktopInputUnavailableException(0, "fixture input block");
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The unavailable-input fixture cannot act.");
+    public void ThrowIfControlLost() => throw new InvalidOperationException("The unavailable-input fixture never acquired control.");
+    public void Stop() => _control.Cancel();
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class ReacquireInputUnavailableDesktop(Observation initial) : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+    private int _observations;
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl)
+        => Interlocked.Increment(ref _observations) == 1
+            ? initial
+            : throw new DesktopInputUnavailableException(0, "fixture reacquisition input block");
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The reacquisition fixture cannot act.");
+    public void ThrowIfControlLost()
+    {
+    }
+    public void Stop()
+    {
+    }
+    public void Dispose() => _control.Dispose();
+}
+
+internal sealed class ReacquireControlBusyDesktop(Observation initial) : IPcDesktop, IDisposable
+{
+    private readonly CancellationTokenSource _control = new();
+    private int _observations;
+
+    public CancellationToken ControlCancellationToken => _control.Token;
+    public Observation Observe(bool beginControl)
+        => Interlocked.Increment(ref _observations) == 1
+            ? initial
+            : throw new ControlSessionBusyException(new IOException("fixture resumed into contention"));
+    public Observation ObserveActiveWindow(bool beginControl) => Observe(beginControl);
+    public DesktopActResult Act(long frameId, JsonElement actions, int settleMilliseconds, bool observeAfter)
+        => throw new InvalidOperationException("The reacquisition contention fixture cannot act.");
+    public void ThrowIfControlLost()
+    {
+    }
+    public void Stop()
+    {
+    }
     public void Dispose() => _control.Dispose();
 }
 

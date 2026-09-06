@@ -50,7 +50,10 @@ internal sealed record DesktopActionFailure(
     int ActionIndex,
     string ActionType,
     string SafeSummary,
-    int CompletedActions);
+    int CompletedActions,
+    string FailureCode = "native_action_failed",
+    int? NativeErrorCode = null,
+    bool? TargetWithinVirtualDesktop = null);
 
 internal sealed record ImageContextMetric(
     string DisplayId,
@@ -152,6 +155,12 @@ internal sealed class PcActionPlanValidationException : ArgumentException
 internal sealed class ControlSessionEndedException()
     : Exception("The desktop control session ended before the action completed.");
 
+internal sealed class DesktopInputUnavailableException(int nativeErrorCode, string message)
+    : InvalidOperationException(message)
+{
+    internal int NativeErrorCode { get; } = nativeErrorCode;
+}
+
 internal sealed class PcActionException : Exception
 {
     internal PcActionException(int actionIndex, string actionType, string safeDescription, Exception innerException)
@@ -161,4 +170,10 @@ internal sealed class PcActionException : Exception
         Data["action_type"] = actionType;
         Data["action_summary"] = safeDescription;
     }
+}
+
+internal sealed class NativeInputStageException(string stage, Exception innerException)
+    : Exception("A native input stage failed.", innerException)
+{
+    internal string Stage { get; } = stage;
 }

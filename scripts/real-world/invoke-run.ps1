@@ -18,19 +18,13 @@ function Invoke-RapidPcRealWorldRun {
         throw "Rapid PC Use executable not found: $resolvedExecutable"
     }
 
-    $startInfo = [Diagnostics.ProcessStartInfo]::new($resolvedExecutable)
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.Environment['RAPID_PC_AGENT_ENABLED'] = '1'
-    $startInfo.Environment['RAPID_PC_AGENT_PROVIDER'] = 'codex'
-    $startInfo.Environment['RAPID_PC_AGENT_MODEL'] = $Model
-    $startInfo.Environment['RAPID_PC_AGENT_REASONING'] = $Reasoning
-    $startInfo.Environment['RAPID_PC_AGENT_SERVICE_TIER'] = $ServiceTier
-    $startInfo.Environment['RAPID_PC_AGENT_IMAGE_DETAIL'] = 'original'
-    $startInfo.Environment['RAPID_PC_CAPTURE_TIER'] = $CaptureTier
+    $startInfo = New-RapidPcBenchmarkDriverStartInfo `
+        -ExecutablePath $resolvedExecutable `
+        -Model $Model `
+        -Reasoning $Reasoning `
+        -ServiceTier $ServiceTier `
+        -CaptureTier $CaptureTier `
+        -MaxDurationMs $MaxDurationMs
 
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -191,6 +185,33 @@ function Invoke-RapidPcRealWorldRun {
         HandoffReasons = @($handoffReasons)
         Profile = $profile.AgentRun
     }
+}
+
+function New-RapidPcBenchmarkDriverStartInfo {
+    param(
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][string]$Model,
+        [Parameter(Mandatory)][ValidateSet('none', 'low', 'medium', 'high')][string]$Reasoning,
+        [Parameter(Mandatory)][ValidateSet('fast', 'flex')][string]$ServiceTier,
+        [Parameter(Mandatory)][ValidateSet('720', '900')][string]$CaptureTier,
+        [Parameter(Mandatory)][ValidateRange(10000, 300000)][int]$MaxDurationMs
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($ExecutablePath))
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Environment['RAPID_PC_AGENT_ENABLED'] = '1'
+    $startInfo.Environment['RAPID_PC_AGENT_PROVIDER'] = 'codex'
+    $startInfo.Environment['RAPID_PC_AGENT_MODEL'] = $Model
+    $startInfo.Environment['RAPID_PC_AGENT_REASONING'] = $Reasoning
+    $startInfo.Environment['RAPID_PC_AGENT_SERVICE_TIER'] = $ServiceTier
+    $startInfo.Environment['RAPID_PC_AGENT_IMAGE_DETAIL'] = 'original'
+    $startInfo.Environment['RAPID_PC_CAPTURE_TIER'] = $CaptureTier
+    $startInfo.Environment['RAPID_PC_AGENT_MAX_DURATION_MS'] = [string]$MaxDurationMs
+    return $startInfo
 }
 
 function Stop-RapidPcBenchmarkDriver {

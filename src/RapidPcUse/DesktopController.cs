@@ -45,6 +45,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
         }
 
         _session.Start();
+
         _captureActiveWindow = captureActiveWindow;
         var operation = _session.BeginOperation();
         Action checkOperation = () => _session.ThrowIfCannotContinue(operation);
@@ -105,7 +106,10 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                     actionIndex + 1,
                     actionType,
                     wrapped.Message,
-                    actionIndex);
+                    actionIndex,
+                    ActionFailureCode(exception),
+                    ActionFailureNativeError(exception),
+                    ActionFailureTargetInBounds(exception));
                 _input.ReleaseAll();
                 break;
             }
@@ -273,8 +277,8 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
                         var interval = OptionalBoundedInt(
                             action,
                             "interval_ms",
-                            0,
-                            0,
+                            InputTimingPolicy.MinimumTypingIntervalMilliseconds,
+                            InputTimingPolicy.MinimumTypingIntervalMilliseconds,
                             SecurityLimits.MaxTypeIntervalMilliseconds);
                         estimatedMilliseconds += (long)text.Length * interval;
                         break;
@@ -483,7 +487,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             case "type":
                 InputController.TypeText(
                     RequiredBoundedString(action, "text", SecurityLimits.MaxTypedCodeUnitsPerAction),
-                    OptionalInt(action, "interval_ms", 0),
+                    OptionalInt(action, "interval_ms", InputTimingPolicy.MinimumTypingIntervalMilliseconds),
                     checkOperation);
                 return 0;
             case "key":
@@ -532,7 +536,7 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             ElapsedMicroseconds(startTimestamp),
             type == "wait" ? SafeInteger(action, "ms") : null,
             type == "type" ? SafeString(action, "text")?.Length : null,
-            type == "type" ? SafeInteger(action, "interval_ms") ?? 0 : null,
+            type == "type" ? SafeInteger(action, "interval_ms") ?? InputTimingPolicy.MinimumTypingIntervalMilliseconds : null,
             pointerPacingMilliseconds > 0 ? pointerPacingMilliseconds : null);
     }
 
@@ -724,6 +728,52 @@ internal sealed class DesktopController : IPcDesktop, IDisposable
             "wait" => $"wait {SafeInteger(action, "ms")?.ToString() ?? "?"} ms",
             _ => "desktop action",
         };
+    }
+
+    private static string ActionFailureCode(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NativeInputStageException stage)
+            {
+                return stage.Stage switch
+                {
+                    "pointer_move" => "pointer_move_failed",
+                    "button_down" => "button_down_failed",
+                    "button_up" => "button_up_failed",
+                    "pointer_scroll" => "pointer_scroll_failed",
+                    _ => "native_action_failed",
+                };
+            }
+        }
+
+        return "native_action_failed";
+    }
+
+    private static int? ActionFailureNativeError(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is System.ComponentModel.Win32Exception win32)
+            {
+                return win32.NativeErrorCode;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool? ActionFailureTargetInBounds(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Data["target_within_virtual_desktop"] is bool value)
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private static string? SafeString(JsonElement value, string property)

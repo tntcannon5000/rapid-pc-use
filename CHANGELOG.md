@@ -2,7 +2,16 @@
 
 ## Unreleased
 
+- Start capture and reasoning without a speculative pointer preflight; validate native input only when the requested action uses it so observation and keyboard-only work are not blocked by an unrelated pointer probe.
+- Verify absolute pointer coordinates before pressing a button, detect ignored relative motion when movement is possible, and preserve stage-specific failures across move, click, drag, mouse-button, and scroll actions.
+- Enforce a 5 ms minimum typing interval alongside the existing 80 ms click floor so ordinary controls can process fast multi-field batches reliably.
+- Guarantee deterministic actuator-fixture cleanup on success and every early failure path so a blocked-input benchmark cannot lock the next build.
+- Preserve the exact bounded native pointer-stage code on terminal inner-loop results and stop after two repeated move, button, or wheel failures.
+- Mark failed paused-task reacquisition as non-replayable so prior task effects are never mistaken for a fresh zero-state run.
+- Mark desktop contention during `pc_resume` or `pc_continue` as non-replayable after the continuation token is consumed; only fresh `pc_run` and `pc_observe` calls advertise safe retry.
 - Make repository-URL installation discoverable to coding agents through root instructions, a copyable natural-language prompt, explicit authority boundaries, checkout verification, and test-enforced install guidance.
+- Change the default inner controller to `gpt-5.6-sol` with medium reasoning.
+- Record each failed provider attempt with its bounded stage, safe reason code, retry decision, latency, exception type, and HRESULT while continuing to omit prompts, screenshots, credentials, response bodies, and exception messages.
 
 ## 0.2.0 - 2026-09-04
 

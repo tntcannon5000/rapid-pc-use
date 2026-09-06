@@ -322,6 +322,7 @@ internal sealed partial class PcAgentLoop : IDisposable
                         null);
                 }
 
+                session.DirectLaunchCompleted = true;
                 observation = _desktop.ObserveActiveWindow(beginControl: true);
             }
 
@@ -409,10 +410,13 @@ internal sealed partial class PcAgentLoop : IDisposable
                 }
                 catch (Exception exception) when (IsProviderFailure(exception))
                 {
+                    var summary = session.DirectLaunchCompleted
+                        ? "The requested application opened successfully, but the PC model provider remained unavailable after bounded recovery attempts. No native input action was executed."
+                        : "The PC model provider remained unavailable after bounded recovery attempts. No native input action was executed.";
                     return Complete(
                         session,
                         PcAgentStatus.Blocked,
-                        "The PC model provider remained unavailable after bounded recovery attempts.",
+                        summary,
                         segmentStarted,
                         null);
                 }
@@ -615,16 +619,31 @@ internal sealed partial class PcAgentLoop : IDisposable
                         observation = actResult.Observation ?? throw new InvalidOperationException("The agent action did not return a fresh observation.");
                         if (actResult.Failure is not null)
                         {
+                            var failureProgress = progress.Evaluate(observation, act.Actions);
+                            var repeatedNativeFailures = session.RegisterNativeFailure(actResult.Failure.FailureCode);
                             AgentTelemetry.Recovery(session.RunId, session.ModelTurns, "native_action", 1);
                             session.AddOutcome(new AgentActionOutcome(
                                 ActionTypes(act.Actions),
-                                ScreenChanged: true,
+                                failureProgress.ScreenChanged,
                                 act.ExpectedChange,
-                                $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Continue from the current screenshot using a different approach."));
+                                $"Action {actResult.Failure.ActionIndex} ({actResult.Failure.ActionType}) was interrupted after {actResult.Failure.CompletedActions} earlier actions. Driver code: {actResult.Failure.FailureCode}. Continue from the current screenshot using a different approach."));
                             RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "action_interrupted");
+                            if (IsPointerFailure(actResult.Failure.FailureCode) && repeatedNativeFailures >= 2)
+                            {
+                                return Complete(
+                                    session,
+                                    PcAgentStatus.Blocked,
+                                    $"Windows rejected native pointer stage '{actResult.Failure.FailureCode}' twice. No further pointer action was attempted; restore synthetic pointer input before retrying.",
+                                    segmentStarted,
+                                    session.Request.ReturnFinalScreenshot ? observation : null,
+                                    actResult.Failure.FailureCode,
+                                    actResult.Failure.NativeErrorCode);
+                            }
+
                             break;
                         }
 
+                        session.ResetNativeFailures();
                         var progressResult = progress.Evaluate(observation, act.Actions);
                         session.AddOutcome(new AgentActionOutcome(
                             ActionTypes(act.Actions),
@@ -824,7 +843,9 @@ internal sealed partial class PcAgentLoop : IDisposable
         PcAgentStatus status,
         string summary,
         long segmentStarted,
-        Observation? finalObservation)
+        Observation? finalObservation,
+        string? code = null,
+        int? nativeErrorCode = null)
     {
         _desktop.ThrowIfControlLost();
         session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
@@ -847,7 +868,7 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.RunId,
             session.RunbookExecutionSamples.Count,
             routeLearningMicroseconds);
-        var result = CreateResult(session, status, summary, null, finalObservation);
+        var result = CreateResult(session, status, summary, null, finalObservation, code: code, nativeErrorCode: nativeErrorCode);
 
         session.Clear();
         AgentTelemetry.RunCompleted(
@@ -867,7 +888,9 @@ internal sealed partial class PcAgentLoop : IDisposable
         string summary,
         PcConfirmation? confirmation,
         Observation? finalObservation,
-        PcHandoff? handoff = null)
+        PcHandoff? handoff = null,
+        string? code = null,
+        int? nativeErrorCode = null)
         => new(
             status,
             session.RunId,
@@ -878,7 +901,12 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.TelemetrySessionId,
             confirmation,
             handoff,
-            finalObservation);
+            finalObservation,
+            code,
+            nativeErrorCode);
+
+    private static bool IsPointerFailure(string code)
+        => code is "pointer_move_failed" or "button_down_failed" or "button_up_failed" or "pointer_scroll_failed";
 
     private void ValidateRequest(PcRunRequest request)
     {
@@ -938,15 +966,28 @@ internal sealed partial class PcAgentLoop : IDisposable
         const int attempts = 3;
         for (var attempt = 1; ; attempt++)
         {
+            var attemptStarted = Stopwatch.GetTimestamp();
             try
             {
                 return await _provider.DecideAsync(request, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception exception) when (
-                IsProviderFailure(exception) &&
-                attempt < attempts &&
-                !cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (IsProviderFailure(exception))
             {
+                var willRetry = attempt < attempts && !cancellationToken.IsCancellationRequested;
+                AgentTelemetry.ProviderAttemptFailed(
+                    runId,
+                    turn,
+                    _provider,
+                    attempt,
+                    attempts,
+                    willRetry,
+                    ElapsedMicroseconds(attemptStarted, Stopwatch.GetTimestamp()),
+                    exception);
+                if (!willRetry)
+                {
+                    throw;
+                }
+
                 AgentTelemetry.Recovery(runId, turn, "provider", attempt);
                 await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), cancellationToken).ConfigureAwait(false);
             }
@@ -960,6 +1001,7 @@ internal sealed partial class PcAgentLoop : IDisposable
                 provider.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 provider.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 (int)provider.StatusCode >= 500,
+            PcModelProviderStageException staged when staged.InnerException is not null => IsProviderFailure(staged.InnerException),
             HttpRequestException or IOException or InvalidOperationException or JsonException => true,
             _ => false,
         };
@@ -1069,7 +1111,10 @@ internal sealed partial class PcAgentLoop : IDisposable
         internal Dictionary<PcRunbookStepReference, int> LastFailedRunbookStepActionCounts { get; } = [];
         internal List<PcRunbookExecutionSample> RunbookExecutionSamples { get; } = [];
         internal bool InitialRetrievalAttempted { get; set; }
+        internal bool DirectLaunchCompleted { get; set; }
         internal string LastRetrievedContext { get; set; } = "";
+        internal string LastNativeFailureCode { get; set; } = "";
+        internal int ConsecutiveNativeFailures { get; set; }
 
         internal void AddOutcome(AgentActionOutcome outcome)
         {
@@ -1078,6 +1123,21 @@ internal sealed partial class PcAgentLoop : IDisposable
             {
                 RecentOutcomes.RemoveAt(0);
             }
+        }
+
+        internal int RegisterNativeFailure(string code)
+        {
+            ConsecutiveNativeFailures = string.Equals(LastNativeFailureCode, code, StringComparison.Ordinal)
+                ? ConsecutiveNativeFailures + 1
+                : 1;
+            LastNativeFailureCode = code;
+            return ConsecutiveNativeFailures;
+        }
+
+        internal void ResetNativeFailures()
+        {
+            LastNativeFailureCode = "";
+            ConsecutiveNativeFailures = 0;
         }
 
         internal void Clear()
@@ -1103,7 +1163,9 @@ internal sealed partial class PcAgentLoop : IDisposable
             LastSuccessfulRunbookStepActionCounts.Clear();
             LastFailedRunbookStepActionCounts.Clear();
             RunbookExecutionSamples.Clear();
+            DirectLaunchCompleted = false;
             LastRetrievedContext = "";
+            ResetNativeFailures();
         }
     }
 }

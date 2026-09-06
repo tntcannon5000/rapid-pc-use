@@ -287,6 +287,69 @@ internal sealed class McpServer(
                 "USER_TAKEOVER: The user is now operating the PC. Stop immediately, make no more PC-use calls in this turn, and end the turn.",
                 isError: false);
         }
+        catch (ToolRequestValidationException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.request_rejected",
+                $"{name} rejected invalid arguments before changing PC state.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = exception.Code,
+                    state_unchanged = true,
+                },
+                exception: exception);
+            return RequestRejectedResult(exception);
+        }
+        catch (ControlSessionBusyException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.control_busy",
+                $"{name} could not acquire desktop control because another Rapid PC Use host owns it.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = "desktop_control_busy",
+                    no_actions_executed = true,
+                    state_unchanged = true,
+                },
+                exception: exception);
+            return ControlBusyResult(retryable: name is "pc_run" or "pc_observe");
+        }
+        catch (DesktopInputUnavailableException exception)
+        {
+            stopwatch.Stop();
+            trace.ToolCompletedTimestamp = Stopwatch.GetTimestamp();
+            DriverLog.Warning(
+                "tool.input_unavailable",
+                $"{name} stopped before capture because Windows rejected the native input health check.",
+                operationId: operationId,
+                tool: name,
+                data: new
+                {
+                    elapsed_ms = stopwatch.ElapsedMilliseconds,
+                    request = requestSummary,
+                    code = "desktop_input_blocked",
+                    native_error_code = exception.NativeErrorCode,
+                    no_actions_executed = true,
+                    state_unchanged = true,
+                    control_released = true,
+                },
+                exception: exception);
+            return InputUnavailableResult(
+                exception.NativeErrorCode,
+                retryable: name is "pc_run" or "pc_observe");
+        }
         catch (Exception exception) when (name is "pc_knowledge_search" or "pc_knowledge_update" or "pc_runbook_search" or "pc_runbook_update")
         {
             stopwatch.Stop();
@@ -412,7 +475,16 @@ internal sealed class McpServer(
     private ToolOutcome RunAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var request = ParseRunRequest(arguments, loop.Options);
+        PcRunRequest request;
+        try
+        {
+            request = ParseRunRequest(arguments, loop.Options);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_run_arguments", exception);
+        }
+
         var result = loop.Run(request);
         return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
     }
@@ -420,12 +492,22 @@ internal sealed class McpServer(
     private ToolOutcome ResumeAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var sessionId = RequiredBoundedString(arguments, "session_id", 128);
-        var confirmationId = RequiredBoundedString(arguments, "confirmation_id", 128);
-        var decision = RequiredBoundedString(arguments, "decision", 32);
-        if (decision is not ("approve_once" or "deny"))
+        string sessionId;
+        string confirmationId;
+        string decision;
+        try
         {
-            throw new ArgumentException("decision must be approve_once or deny.");
+            sessionId = RequiredBoundedString(arguments, "session_id", 128);
+            confirmationId = RequiredBoundedString(arguments, "confirmation_id", 128);
+            decision = RequiredBoundedString(arguments, "decision", 32);
+            if (decision is not ("approve_once" or "deny"))
+            {
+                throw new ArgumentException("decision must be approve_once or deny.");
+            }
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_resume_arguments", exception);
         }
 
         var result = loop.Resume(sessionId, confirmationId, decision == "approve_once");
@@ -435,12 +517,23 @@ internal sealed class McpServer(
     private ToolOutcome ContinueAgent(JsonElement arguments)
     {
         var loop = agent ?? throw new MethodNotFoundException("The internal PC agent is unavailable.");
-        var sessionId = RequiredBoundedString(arguments, "session_id", 128);
-        var handoffId = RequiredBoundedString(arguments, "handoff_id", 128);
-        var outerContext = RequiredBoundedString(
-            arguments,
-            "outer_context",
-            SecurityLimits.MaxAgentOuterContextCharacters);
+        string sessionId;
+        string handoffId;
+        string outerContext;
+        try
+        {
+            sessionId = RequiredBoundedString(arguments, "session_id", 128);
+            handoffId = RequiredBoundedString(arguments, "handoff_id", 128);
+            outerContext = RequiredBoundedString(
+                arguments,
+                "outer_context",
+                SecurityLimits.MaxAgentOuterContextCharacters);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ToolRequestValidationException("invalid_pc_continue_arguments", exception);
+        }
+
         var result = loop.ResumeHandoff(sessionId, handoffId, outerContext);
         return new ToolOutcome(AgentResult(result), AgentResultLogData(result));
     }
@@ -477,6 +570,8 @@ internal sealed class McpServer(
         confirmation_requested = result.Confirmation is not null,
         handoff_requested = result.Handoff is not null,
         returned_final_frame = result.FinalObservation is not null,
+        code = result.Code,
+        native_error_code = result.NativeErrorCode,
     };
 
     private static Dictionary<string, object?> AgentResult(PcRunResult result)
@@ -510,6 +605,13 @@ internal sealed class McpServer(
                     ["expiresAt"] = result.Handoff.ExpiresUtc.ToString("O"),
                 },
         };
+        if (result.Code is not null)
+        {
+            structured["code"] = result.Code;
+            structured["native_error_code"] = result.NativeErrorCode;
+            structured["control_released"] = result.Status is not PcAgentStatus.NeedsConfirmation and not PcAgentStatus.NeedsHandoff;
+        }
+
         var message = result.Status switch
         {
             PcAgentStatus.NeedsConfirmation when result.Confirmation is not null =>
@@ -571,6 +673,9 @@ internal sealed class McpServer(
             ["action_index"] = failure.ActionIndex,
             ["action_type"] = failure.ActionType,
             ["completed_actions"] = failure.CompletedActions,
+            ["failure_code"] = failure.FailureCode,
+            ["native_error_code"] = failure.NativeErrorCode,
+            ["target_within_virtual_desktop"] = failure.TargetWithinVirtualDesktop,
             ["control_active"] = result.Observation?.ControlActive ?? true,
             ["frame_id"] = result.Observation?.FrameId,
         };
@@ -596,6 +701,9 @@ internal sealed class McpServer(
         settle_elapsed_us = result.SettleElapsedMicroseconds,
         interrupted = result.Failure is not null,
         completed_actions = result.Failure?.CompletedActions,
+        failure_code = result.Failure?.FailureCode,
+        native_error_code = result.Failure?.NativeErrorCode,
+        target_within_virtual_desktop = result.Failure?.TargetWithinVirtualDesktop,
         observation = observationData,
     };
 
@@ -942,7 +1050,7 @@ internal sealed class McpServer(
             ["scroll_y"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native vertical scroll delta. Positive scrolls down and negative scrolls up; roughly 100 units become one Windows wheel notch." },
             ["scroll_x"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = SecurityLimits.MinScrollDeltaPerAction, ["maximum"] = SecurityLimits.MaxScrollDeltaPerAction, ["description"] = "Model-native horizontal scroll delta. Positive scrolls right and negative scrolls left; roughly 100 units become one Windows wheel notch." },
             ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxTypedCodeUnitsPerAction, ["description"] = "Literal text typed as Unicode keystrokes, never clipboard paste." },
-            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; default 0 ms. Use a positive delay only for a target known to drop rapid input." },
+            ["interval_ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = InputTimingPolicy.MinimumTypingIntervalMilliseconds, ["maximum"] = SecurityLimits.MaxTypeIntervalMilliseconds, ["description"] = "Delay per typed UTF-16 code unit; minimum and default 5 ms. Use a larger delay only for a target known to drop rapid input." },
             ["keys"] = new Dictionary<string, object?> { ["type"] = "string", ["maxLength"] = SecurityLimits.MaxKeyChordCharacters, ["description"] = "Key or '+'-joined chord, e.g. CTRL+L, ENTER, ALT+F4." },
             ["ms"] = new Dictionary<string, object?> { ["type"] = "integer", ["minimum"] = 0, ["maximum"] = SecurityLimits.MaxWaitMilliseconds },
         };
@@ -1390,6 +1498,110 @@ internal sealed class McpServer(
         };
     }
 
+    private static Dictionary<string, object?> RequestRejectedResult(ToolRequestValidationException exception)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = "PC_REQUEST_REJECTED: Rapid PC Use rejected invalid tool arguments before changing PC state. Correct the request and retry.",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "request_rejected",
+                ["sessionId"] = "",
+                ["summary"] = "Rapid PC Use rejected invalid tool arguments before changing PC state.",
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = true,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["code"] = exception.Code,
+            },
+            ["isError"] = false,
+        };
+    }
+
+    private static Dictionary<string, object?> ControlBusyResult(bool retryable)
+    {
+        var summary = retryable
+            ? "Another Rapid PC Use host currently controls this Windows desktop. No action was executed; retry after that session releases control."
+            : "Another Rapid PC Use host controlled the desktop while this paused task tried to resume. No action was executed in this call, but the continuation token is no longer replayable. Start a new PC run from the current visible state after the other session releases control.";
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = $"PC_CONTROL_BUSY: {summary}",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "blocked",
+                ["sessionId"] = "",
+                ["summary"] = summary,
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = retryable,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["code"] = "desktop_control_busy",
+            },
+            ["isError"] = false,
+        };
+    }
+
+    private static Dictionary<string, object?> InputUnavailableResult(int nativeErrorCode, bool retryable)
+    {
+        var summary = retryable
+            ? "Windows is currently blocking synthetic pointer input on the interactive desktop. No action was executed and PC control was released. End any exclusive-input or remote-control mode, return to the unlocked default desktop, then retry."
+            : "Windows blocked synthetic pointer input while reacquiring control for a paused task. No action was executed in this call and PC control was released, but the continuation token is no longer replayable. Restore desktop input and start a new PC run from the current visible state.";
+        return new Dictionary<string, object?>
+        {
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = $"PC_INPUT_UNAVAILABLE: {summary}",
+                },
+            },
+            ["structuredContent"] = new Dictionary<string, object?>
+            {
+                ["status"] = "blocked",
+                ["sessionId"] = "",
+                ["summary"] = summary,
+                ["modelTurns"] = 0,
+                ["actionsExecuted"] = 0,
+                ["elapsedMs"] = 0,
+                ["telemetrySessionId"] = DriverLog.SessionId,
+                ["confirmation"] = null,
+                ["handoff"] = null,
+                ["retryable"] = retryable,
+                ["no_actions_executed"] = true,
+                ["state_unchanged"] = true,
+                ["control_released"] = true,
+                ["code"] = "desktop_input_blocked",
+                ["native_error_code"] = nativeErrorCode,
+            },
+            ["isError"] = false,
+        };
+    }
+
     private static IEnumerable<Exception> ExceptionChain(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
@@ -1400,7 +1612,7 @@ internal sealed class McpServer(
 
     private static Dictionary<string, object?> ToolText(string text, bool isError) => new()
     {
-        ["content"] = new object[]
+        ["content"] = new List<object>
         {
             new Dictionary<string, object?> { ["type"] = "text", ["text"] = text },
         },
@@ -1558,6 +1770,12 @@ internal sealed class McpServer(
 
     private sealed class ProtocolLimitException()
         : Exception("The JSON-RPC message exceeded the configured character limit.");
+
+    private sealed class ToolRequestValidationException(string code, Exception innerException)
+        : Exception("A Rapid PC Use tool request was invalid.", innerException)
+    {
+        internal string Code { get; } = code;
+    }
 
     private sealed record ToolOutcome(object Result, object? LogData);
 

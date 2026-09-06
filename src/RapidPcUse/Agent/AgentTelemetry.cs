@@ -320,6 +320,40 @@ internal static class AgentTelemetry
             tool: "pc_run",
             data: new { turn, category, attempt });
 
+    internal static void ProviderAttemptFailed(
+        string runId,
+        int turn,
+        IPcModelProvider provider,
+        int attempt,
+        int maximumAttempts,
+        bool willRetry,
+        long elapsedMicroseconds,
+        Exception exception)
+    {
+        var failure = ProviderFailureDiagnostics.Capture(exception);
+        DriverLog.Warning(
+            "agent.provider_attempt_failed",
+            "The internal model provider failed during a bounded decision attempt.",
+            operationId: runId,
+            tool: "pc_run",
+            data: new
+            {
+                turn,
+                provider = provider.Name,
+                model = provider.Model,
+                attempt,
+                maximum_attempts = maximumAttempts,
+                will_retry = willRetry,
+                elapsed_us = elapsedMicroseconds,
+                stage = failure.Stage,
+                reason_code = failure.ReasonCode,
+                exception_type = failure.ExceptionType,
+                hresult = failure.HResult,
+                privacy = "Prompts, screenshots, credentials, response bodies, and exception messages omitted.",
+            },
+            exception: exception);
+    }
+
     internal static void RunCompleted(
         string runId,
         PcAgentStatus status,

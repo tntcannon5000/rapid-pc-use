@@ -54,6 +54,14 @@ try {
         name = 'pc_observe'
         arguments = @{ begin_control = $true }
     }
+    if ([string]$observe.result.structuredContent.status -eq 'blocked' -and
+        [string]$observe.result.structuredContent.code -eq 'desktop_input_blocked') {
+        $nativeError = [string]$observe.result.structuredContent.native_error_code
+        throw "Active-control smoke requires a writable interactive desktop, but Windows blocked synthetic input before capture (desktop_input_blocked, native_error_code=$nativeError)."
+    }
+    if ($observe.result.isError) {
+        throw "Active observation failed: $((@($observe.result.content | Where-Object type -eq 'text').text) -join ' ')"
+    }
     $observedManifestText = [string]($observe.result.content | Where-Object type -eq 'text' | Select-Object -First 1 -ExpandProperty text)
     $observedManifestMatch = [Regex]::Match($observedManifestText, '^RAPID_PC_FRAME (?<json>.+)$')
     if (-not $observedManifestMatch.Success) {
@@ -79,9 +87,6 @@ finally {
     }
 }
 
-if ($observe.result.isError) {
-    throw "Active observation failed: $((@($observe.result.content | Where-Object type -eq 'text').text) -join ' ')"
-}
 if ($stop.result.isError) {
     throw "Control stop failed: $((@($stop.result.content | Where-Object type -eq 'text').text) -join ' ')"
 }
