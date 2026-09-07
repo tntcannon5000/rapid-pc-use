@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove the inner operation-specific confirmation protocol, `pc_resume`, authority scopes, and model risk declarations; aligned host and inner models now execute requested GUI actions and trusted runbook steps directly while physical Escape, native validation, desktop ownership, limits, and telemetry remain intact.
 - Remove the optional foreground-process lock from `pc_run`; cross-application workflows now remain inside the same fast visual loop while effect-specific authority boundaries continue to apply.
 - Start capture and reasoning without a speculative pointer preflight; validate native input only when the requested action uses it so observation and keyboard-only work are not blocked by an unrelated pointer probe.
 - Verify absolute pointer coordinates before pressing a button, detect ignored relative motion when movement is possible, and preserve stage-specific failures across move, click, drag, mouse-button, and scroll actions.

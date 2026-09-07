@@ -4,6 +4,11 @@ using System.Runtime.InteropServices;
 
 namespace RapidPcUse.Agent;
 
+internal interface IForegroundWindowInspector
+{
+    string GetProcessName();
+}
+
 internal sealed class ForegroundWindowInspector : IForegroundWindowInspector
 {
     public string GetProcessName()
