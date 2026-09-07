@@ -189,11 +189,6 @@ internal sealed partial class PcAgentLoop
             return new RunbookRouteResult(current, null);
         }
 
-        if (session.ApprovedRunbookStep is not null && session.ApprovedRunbookStep != reference)
-        {
-            ClearRunbookApprovals(session);
-        }
-
         ActivateRunbook(session, decision.RunbookKey);
 
         if (session.NonRepeatableRunbookStepAttempts.Contains(reference) ||
@@ -210,39 +205,6 @@ internal sealed partial class PcAgentLoop
                 "The driver rejected a duplicate runbook operation before dispatch."));
             RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "runbook_duplicate_rejected");
             return new RunbookRouteResult(current, null);
-        }
-
-        if ((selectedStep.Kind is "launch" or "process") &&
-            !session.Request.Scope.AllowLocalProcessLaunches &&
-            !RunbookRiskApproved(session, reference, PcRiskFlag.LocalProcessLaunch))
-        {
-            session.PendingRunbookApprovalStep = reference;
-            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "runbook_confirmation");
-            return new RunbookRouteResult(
-                current,
-                Pause(
-                    session,
-                    PcRiskFlag.LocalProcessLaunch,
-                    "Allow the PC agent to launch the selected trusted local runbook step?",
-                    current.TopologyKey,
-                    segmentStarted));
-        }
-
-        var stepRisk = RequiredRunbookRisk(selectedStep.Effect);
-        if (stepRisk is PcRiskFlag requiredRisk &&
-            !RunbookRiskApproved(session, reference, requiredRisk) &&
-            !ScopeAllowsRisk(session.Request.Scope, requiredRisk))
-        {
-            session.PendingRunbookApprovalStep = reference;
-            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "runbook_effect_confirmation");
-            return new RunbookRouteResult(
-                current,
-                Pause(
-                    session,
-                    requiredRisk,
-                    ConfirmationSummary(requiredRisk),
-                    current.TopologyKey,
-                    segmentStarted));
         }
 
         if (selectedStep.RequiresElevation)
@@ -286,8 +248,6 @@ internal sealed partial class PcAgentLoop
 
             attemptStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             session.ActionsExecuted++;
-            ClearRunbookApprovals(session);
-
             var execution = _localRoutes.Execute(
                 reference,
                 selectedStep,
@@ -396,40 +356,6 @@ internal sealed partial class PcAgentLoop
             routeContext.AsSpan(0, routeBudget),
             marker,
             resultData.AsSpan(0, resultBudget));
-    }
-
-    private static bool RunbookRiskApproved(
-        RunSession session,
-        PcRunbookStepReference reference,
-        PcRiskFlag risk)
-        => session.ApprovedRunbookStep == reference && session.ApprovedRunbookRisks.Contains(risk);
-
-    private static void PreserveRunbookApprovalsOnlyForDecision(RunSession session, PcAgentDecision decision)
-    {
-        if (session.ApprovedRunbookStep is null)
-        {
-            return;
-        }
-
-        if (decision is RunbookStepDecision runbookStep &&
-            session.ApprovedRunbookStep == new PcRunbookStepReference(runbookStep.RunbookKey, runbookStep.StepId))
-        {
-            return;
-        }
-
-        ClearRunbookApprovals(session);
-    }
-
-    private static void ClearRunbookApprovals(RunSession session)
-    {
-        if (session.ApprovedRunbookStep is not null || session.PendingRunbookApprovalStep is not null)
-        {
-            session.ApprovedRisk = null;
-        }
-
-        session.ApprovedRunbookStep = null;
-        session.PendingRunbookApprovalStep = null;
-        session.ApprovedRunbookRisks.Clear();
     }
 
     private static string AppendRequiredVerificationInstruction(

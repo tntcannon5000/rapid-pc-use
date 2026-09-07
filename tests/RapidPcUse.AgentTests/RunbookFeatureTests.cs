@@ -110,10 +110,7 @@ internal static class RunbookFeatureTests
             Options(),
             new FixedWindowInspector(),
             localRoutes: routes);
-        var request = Request(maxNoProgress: 3) with
-        {
-            Scope = Scope() with { AllowLocalProcessLaunches = true },
-        };
+        var request = Request(maxNoProgress: 3);
 
         var result = loop.Run(request);
         Assert(result.Status == PcAgentStatus.Completed, "driver-local route did not complete");
@@ -185,7 +182,7 @@ internal static class RunbookFeatureTests
         return Task.CompletedTask;
     }
 
-    internal static Task RunbookLaunchRequiresAuthority()
+    internal static Task RunbookLaunchExecutesDirectly()
     {
         var state = new AgentWorkingState("Need fixture", [], "Launch trusted fixture", [], []);
         using var provider = new RecordingProvider(
@@ -203,25 +200,22 @@ internal static class RunbookFeatureTests
             new FixedWindowInspector(),
             localRoutes: routes);
 
-        var paused = loop.Run(Request(maxNoProgress: 3));
-        Assert(paused.Status == PcAgentStatus.NeedsConfirmation && paused.Confirmation?.Risk == PcRiskFlag.LocalProcessLaunch,
-            "unscoped local launch did not pause at its dedicated authority boundary");
-        Assert(routes.Executions.Count == 0, "runbook launched before approval");
-        var completed = loop.Resume(paused.SessionId, paused.Confirmation!.ConfirmationId, approve: true);
-        Assert(completed.Status == PcAgentStatus.Completed, "approved runbook launch did not resume");
+        var completed = loop.Run(Request(maxNoProgress: 3));
+        Assert(completed.Status == PcAgentStatus.Completed, "trusted runbook launch did not complete");
         Assert(routes.Executions.Count == 1 && completed.ActionsExecuted == 1,
-            "one-shot launch authority executed the wrong number of steps");
+            "trusted launch executed the wrong number of steps");
         return Task.CompletedTask;
     }
 
-    internal static Task RunbookEffectRequiresAuthority()
+    internal static Task RunbookEffectExecutesDirectly()
     {
         var state = new AgentWorkingState("Fixture visible", [], "Reset local fixture", [], []);
         using var provider = new RecordingProvider(
         [
             new RunbookStepDecision("workflow.fixture", "reset", "Fixture resets", state),
+            new FinishDecision("Fixture reset.", state, "Fixture reset is visible"),
         ]);
-        using var desktop = new FakeDesktop([Observation(1, [1])]);
+        using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
         var routes = new FakeLocalRouteRuntime(
             "workflow.fixture",
             "reset",
@@ -235,13 +229,13 @@ internal static class RunbookFeatureTests
             localRoutes: routes);
 
         var result = loop.Run(Request(maxNoProgress: 3));
-        Assert(result.Status == PcAgentStatus.NeedsConfirmation && result.Confirmation?.Risk == PcRiskFlag.LocalDeletion,
-            "the trusted local POST bypassed its declared deletion authority");
-        Assert(routes.Executions.Count == 0, "the trusted local POST executed before effect approval");
+        Assert(result.Status == PcAgentStatus.Completed, "trusted effectful step did not complete");
+        Assert(routes.Executions.SequenceEqual(["workflow.fixture/reset"]),
+            "trusted effectful step did not execute exactly once");
         return Task.CompletedTask;
     }
 
-    internal static Task EffectfulProcessAccumulatesExactAuthority()
+    internal static Task EffectfulProcessExecutesExactlyOnce()
     {
         var state = new AgentWorkingState("Need exact maintenance", [], "Run trusted maintenance once", [], []);
         using var provider = new RecordingProvider(
@@ -264,25 +258,11 @@ internal static class RunbookFeatureTests
             new FixedWindowInspector(),
             localRoutes: routes);
 
-        var processPause = loop.Run(Request(maxNoProgress: 3));
-        Assert(processPause.Status == PcAgentStatus.NeedsConfirmation &&
-               processPause.Confirmation?.Risk == PcRiskFlag.LocalProcessLaunch,
-            "an unscoped effectful process did not request launch authority first");
-        var effectPause = loop.Resume(
-            processPause.SessionId,
-            processPause.Confirmation!.ConfirmationId,
-            approve: true);
-        Assert(effectPause.Status == PcAgentStatus.NeedsConfirmation &&
-               effectPause.Confirmation?.Risk == PcRiskFlag.LocalDeletion,
-            "the exact process did not retain its first approval while requesting effect authority");
-        var completed = loop.Resume(
-            effectPause.SessionId,
-            effectPause.Confirmation!.ConfirmationId,
-            approve: true);
+        var completed = loop.Run(Request(maxNoProgress: 3));
         Assert(completed.Status == PcAgentStatus.Completed && completed.ActionsExecuted == 1,
-            "the two exact one-shot approvals did not dispatch one process step");
+            "the trusted process step did not dispatch exactly once");
         Assert(routes.Executions.SequenceEqual(["workflow.fixture/maintain"]),
-            "multi-scope approval repeated or changed the trusted process target");
+            "duplicate model decisions repeated or changed the trusted process target");
         return Task.CompletedTask;
     }
 
@@ -309,10 +289,7 @@ internal static class RunbookFeatureTests
             new FixedWindowInspector(),
             localRoutes: routes);
 
-        var result = loop.Run(Request(maxNoProgress: 3) with
-        {
-            Scope = Scope() with { AllowLocalDeletion = true },
-        });
+        var result = loop.Run(Request(maxNoProgress: 3));
         Assert(result.Status == PcAgentStatus.Completed, "an ambiguous effectful attempt could not recover");
         Assert(result.ActionsExecuted == 1 && routes.Executions.SequenceEqual(["workflow.fixture/reset"]),
             "the effectful attempt did not consume exactly one action or was dispatched twice");
@@ -371,10 +348,7 @@ internal static class RunbookFeatureTests
             new FixedWindowInspector(),
             localRoutes: routes);
 
-        var result = loop.Run(Request(maxNoProgress: 3) with
-        {
-            Scope = Scope() with { AllowLocalProcessLaunches = true },
-        });
+        var result = loop.Run(Request(maxNoProgress: 3));
         Assert(result.Status == PcAgentStatus.NeedsHandoff && result.Handoff?.Reason == PcHandoffReason.UnsupportedCapability,
             "elevated runbook target did not hand off before secure desktop");
         Assert(routes.Executions.Count == 0, "elevated process dispatch began before the handoff");
@@ -422,7 +396,6 @@ internal static class RunbookFeatureTests
                 actions.RootElement.Clone(),
                 state,
                 "Completion banner appears",
-                new HashSet<PcRiskFlag>(),
                 "FIXTURE COMPLETE",
                 "Fixture completed."),
             new FinishDecision("The exact local status is verified.", state, "Trusted local status data"),
@@ -459,7 +432,7 @@ internal static class RunbookFeatureTests
         using var provider = new RecordingProvider(
         [
             new FinishDecision("Initial exact state.", state, "Fixture status"),
-            new ActDecision(actions.RootElement.Clone(), state, "Fixture changes", new HashSet<PcRiskFlag>()),
+            new ActDecision(actions.RootElement.Clone(), state, "Fixture changes"),
             new FinishDecision("State after native mutation.", state, "Fixture status"),
             new FinishDecision("Fresh exact state.", state, "Fresh fixture status"),
         ]);
@@ -564,10 +537,7 @@ internal static class RunbookFeatureTests
             new FixedWindowInspector(),
             localRoutes: routes);
 
-        var result = loop.Run(Request(maxNoProgress: 3) with
-        {
-            Scope = Scope() with { AllowLocalProcessLaunches = true },
-        });
+        var result = loop.Run(Request(maxNoProgress: 3));
         Assert(result.Status == PcAgentStatus.Completed, "bounded-result fixture did not complete");
         Assert(provider.Requests[1].RetrievedContext.Length <= SecurityLimits.MaxAgentRetrievedContextCharacters,
             "runbook route plus local result exceeded the inner context cap");
@@ -871,10 +841,7 @@ internal static class RunbookFeatureTests
             localRoutes: routes);
 
         var wallStarted = System.Diagnostics.Stopwatch.StartNew();
-        var result = loop.Run(Request(maxNoProgress: 3) with
-        {
-            Scope = Scope() with { AllowLocalProcessLaunches = true },
-        });
+        var result = loop.Run(Request(maxNoProgress: 3));
         wallStarted.Stop();
         Assert(result.Status == PcAgentStatus.Completed && result.ElapsedMilliseconds >= 120,
             "terminal route-learning persistence was omitted from active elapsed time");
@@ -1110,17 +1077,8 @@ internal static class RunbookFeatureTests
         MaxConsecutiveNoProgressTurns: 3,
         ImageDetail: "original");
 
-    private static PcRunScope Scope() => new(
-        AllowExternalCommunication: false,
-        AllowRemoteContentChanges: false,
-        AllowLocalDeletion: false,
-        AllowCredentials: true,
-        AllowPurchases: false,
-        AllowAccountOrPermissionChanges: false);
-
     private static PcRunRequest Request(int maxNoProgress) => new(
         "Complete the harmless fixture.",
-        Scope(),
         new PcRunLimits(12, 32, 30_000, maxNoProgress),
         ReturnFinalScreenshot: false);
 

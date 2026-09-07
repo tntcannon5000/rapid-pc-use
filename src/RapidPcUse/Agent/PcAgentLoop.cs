@@ -76,103 +76,6 @@ internal sealed partial class PcAgentLoop : IDisposable
 
     internal int RetainedImageCount => _visualMemory.RetainedImageCount;
 
-    internal PcRunResult Resume(string sessionId, string confirmationId, bool approve)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        RunSession session;
-        lock (_gate)
-        {
-            if (_active)
-            {
-                throw new InvalidOperationException("The Rapid PC Use agent is already active.");
-            }
-
-            session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting confirmation.");
-            if (session.Handoff is not null)
-            {
-                throw new InvalidOperationException("The paused run is awaiting outer assistance, not confirmation.");
-            }
-
-            var confirmation = session.Confirmation ?? throw new InvalidOperationException("The paused run has no confirmation request.");
-            if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
-                !string.Equals(confirmation.ConfirmationId, confirmationId, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("The PC agent confirmation token does not match the paused run.");
-            }
-
-            if (_timeProvider.GetUtcNow() > confirmation.ExpiresUtc)
-            {
-                _paused = null;
-                session.Clear();
-                var expired = CreateResult(
-                    session,
-                    PcAgentStatus.Denied,
-                    "The pending confirmation expired and the PC task remained stopped.",
-                    null,
-                    null);
-                AgentTelemetry.RunCompleted(
-                    session.RunId,
-                    expired.Status,
-                    session.ModelTurns,
-                    session.ActionsExecuted,
-                    expired.ElapsedMilliseconds,
-                    0,
-                    0);
-                return expired;
-            }
-
-            _paused = null;
-            if (!approve)
-            {
-                session.Clear();
-                var denied = CreateResult(session, PcAgentStatus.Denied, "The requested operation was not approved.", null, null);
-                AgentTelemetry.RunCompleted(
-                    session.RunId,
-                    denied.Status,
-                    session.ModelTurns,
-                    session.ActionsExecuted,
-                    denied.ElapsedMilliseconds,
-                    0,
-                    0);
-                return denied;
-            }
-
-            if (session.PendingRunbookApprovalStep is { } pendingRunbookStep)
-            {
-                if (session.ApprovedRunbookStep != pendingRunbookStep)
-                {
-                    session.ApprovedRunbookStep = pendingRunbookStep;
-                    session.ApprovedRunbookRisks.Clear();
-                }
-
-                session.ApprovedRunbookRisks.Add(confirmation.Risk);
-                session.PendingRunbookApprovalStep = null;
-            }
-            else
-            {
-                ClearRunbookApprovals(session);
-            }
-
-            // This is surfaced to the inner controller for the next decision.
-            // Runbook authority is separately bound to the exact retrieved step.
-            session.ApprovedRisk = confirmation.Risk;
-            session.Confirmation = null;
-            _active = true;
-        }
-
-        try
-        {
-            return ContinueAsync(session).GetAwaiter().GetResult();
-        }
-        finally
-        {
-            lock (_gate)
-            {
-                _active = false;
-            }
-        }
-    }
-
     internal PcRunResult ResumeHandoff(string sessionId, string handoffId, string outerContext)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -193,11 +96,6 @@ internal sealed partial class PcAgentLoop : IDisposable
             }
 
             session = _paused ?? throw new InvalidOperationException("No PC agent run is awaiting outer assistance.");
-            if (session.Confirmation is not null)
-            {
-                throw new InvalidOperationException("The paused run is awaiting confirmation, not outer assistance.");
-            }
-
             var handoff = session.Handoff ?? throw new InvalidOperationException("The paused run has no handoff request.");
             if (!string.Equals(session.RunId, sessionId, StringComparison.Ordinal) ||
                 !string.Equals(handoff.HandoffId, handoffId, StringComparison.Ordinal))
@@ -213,7 +111,6 @@ internal sealed partial class PcAgentLoop : IDisposable
                     session,
                     PcAgentStatus.Blocked,
                     "The outer-assistance handoff expired and the PC task remained stopped.",
-                    null,
                     null);
                 AgentTelemetry.RunCompleted(
                     session.RunId,
@@ -363,13 +260,11 @@ internal sealed partial class PcAgentLoop : IDisposable
                 _visualMemory.Replace(current);
                 var turnRequest = new PcModelTurnRequest(
                     session.Request.Task,
-                    session.Request.Scope,
                     session.State,
                     session.RecentOutcomes,
                     current,
                     session.ModelTurns + 1,
                     session.Request.Limits.MaxActions - session.ActionsExecuted,
-                    session.ApprovedRisk,
                     session.RunId,
                     session.PendingOuterContext,
                     string.IsNullOrWhiteSpace(session.PendingRetrievedContext)
@@ -429,8 +324,6 @@ internal sealed partial class PcAgentLoop : IDisposable
                 var frameId = current.FrameId;
                 observation = null;
                 _visualMemory.Clear();
-
-                PreserveRunbookApprovalsOnlyForDecision(session, modelResult.Decision);
 
                 switch (modelResult.Decision)
                 {
@@ -509,22 +402,6 @@ internal sealed partial class PcAgentLoop : IDisposable
                             segmentStarted,
                             null);
 
-                    case ConfirmDecision confirmation:
-                        session.State = confirmation.NextState;
-                        if (session.ApprovedRisk == confirmation.Risk)
-                        {
-                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_repeated");
-                            return Complete(
-                                session,
-                                PcAgentStatus.Blocked,
-                                "The inner controller repeated a confirmation request that was already approved.",
-                                segmentStarted,
-                                null);
-                        }
-
-                        RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "confirmation_requested");
-                        return Pause(session, confirmation.Risk, confirmation.OperationSummary, current.TopologyKey, segmentStarted);
-
                     case HandoffDecision handoff:
                         session.State = handoff.NextState;
                         RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "outer_handoff_requested");
@@ -532,35 +409,6 @@ internal sealed partial class PcAgentLoop : IDisposable
 
                     case ActDecision act:
                         session.State = act.NextState;
-                        var policyStarted = Stopwatch.GetTimestamp();
-                        var policy = ActionPolicy.Evaluate(act, session.Request.Scope, session.ApprovedRisk);
-                        AgentTelemetry.PolicyEvaluated(
-                            session.RunId,
-                            session.ModelTurns,
-                            act.Actions.GetArrayLength(),
-                            (long)(Stopwatch.GetElapsedTime(policyStarted).TotalMilliseconds * 1_000));
-                        if (policy.BlockReason is not null)
-                        {
-                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "policy_blocked");
-                            return Complete(
-                                session,
-                                PcAgentStatus.Blocked,
-                                policy.BlockReason,
-                                segmentStarted,
-                                null);
-                        }
-
-                        if (policy.ConfirmationRisk is PcRiskFlag risk)
-                        {
-                            RecordDecisionRoute(session, modelResult, iterationStarted, providerStarted, providerCompleted, "policy_confirmation");
-                            return Pause(session, risk, ConfirmationSummary(risk), current.TopologyKey, segmentStarted);
-                        }
-
-                        if (!policy.Allowed)
-                        {
-                            throw new InvalidOperationException("The action policy returned an invalid result.");
-                        }
-
                         var actionCount = act.Actions.GetArrayLength();
                         if (actionCount > session.Request.Limits.MaxActions - session.ActionsExecuted)
                         {
@@ -610,11 +458,6 @@ internal sealed partial class PcAgentLoop : IDisposable
                         {
                             RearmActiveRunbookVerifiers(session);
                         }
-                        if (policy.ConsumedApprovedRisk)
-                        {
-                            session.ApprovedRisk = null;
-                        }
-
                         observation = actResult.Observation ?? throw new InvalidOperationException("The agent action did not return a fresh observation.");
                         if (actResult.Failure is not null)
                         {
@@ -755,45 +598,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         }
     }
 
-    private PcRunResult Pause(
-        RunSession session,
-        PcRiskFlag risk,
-        string summary,
-        string topologyKey,
-        long segmentStarted)
-    {
-        _desktop.ThrowIfControlLost();
-        session.ActiveElapsedMilliseconds += ElapsedMilliseconds(segmentStarted);
-        session.Confirmation = new PcConfirmation(
-            DriverLog.NewOperationId("confirm"),
-            summary,
-            risk,
-            _timeProvider.GetUtcNow() + SecurityLimits.AgentConfirmationLifetime);
-        session.ExpectedTopologyKey = topologyKey;
-        _visualMemory.Clear();
-        _desktop.Stop();
-        lock (_gate)
-        {
-            _paused = session;
-        }
-
-        var result = CreateResult(
-            session,
-            PcAgentStatus.NeedsConfirmation,
-            "The PC task is waiting for confirmation in the main Codex conversation.",
-            session.Confirmation,
-            null);
-        AgentTelemetry.RunCompleted(
-            session.RunId,
-            result.Status,
-            session.ModelTurns,
-            session.ActionsExecuted,
-            result.ElapsedMilliseconds,
-            0,
-            StateBytes(session.State));
-        return result;
-    }
-
     private PcRunResult PauseForHandoff(
         RunSession session,
         HandoffDecision decision,
@@ -807,10 +611,6 @@ internal sealed partial class PcAgentLoop : IDisposable
             decision.Reason,
             decision.Request,
             _timeProvider.GetUtcNow() + SecurityLimits.AgentHandoffLifetime);
-        // A one-shot confirmation is bound to the exact pending action. Never
-        // carry it across an outer-planner boundary where the plan may change.
-        session.ApprovedRisk = null;
-        ClearRunbookApprovals(session);
         session.ExpectedTopologyKey = topologyKey;
         _visualMemory.Clear();
         _desktop.Stop();
@@ -823,7 +623,6 @@ internal sealed partial class PcAgentLoop : IDisposable
             session,
             PcAgentStatus.NeedsHandoff,
             "The PC task is waiting for bounded assistance from the outer Codex planner.",
-            null,
             null,
             session.Handoff);
         AgentTelemetry.RunCompleted(
@@ -867,7 +666,7 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.RunId,
             session.RunbookExecutionSamples.Count,
             routeLearningMicroseconds);
-        var result = CreateResult(session, status, summary, null, finalObservation, code: code, nativeErrorCode: nativeErrorCode);
+        var result = CreateResult(session, status, summary, finalObservation, code: code, nativeErrorCode: nativeErrorCode);
 
         session.Clear();
         AgentTelemetry.RunCompleted(
@@ -885,7 +684,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         RunSession session,
         PcAgentStatus status,
         string summary,
-        PcConfirmation? confirmation,
         Observation? finalObservation,
         PcHandoff? handoff = null,
         string? code = null,
@@ -898,7 +696,6 @@ internal sealed partial class PcAgentLoop : IDisposable
             session.ActionsExecuted,
             session.ActiveElapsedMilliseconds,
             session.TelemetrySessionId,
-            confirmation,
             handoff,
             finalObservation,
             code,
@@ -1006,36 +803,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         return $"The driver rejected {location}{exception.SafeMessage}{range} No action executed; correct the batch using the current screenshot.";
     }
 
-    private static string ConfirmationSummary(PcRiskFlag risk) => risk switch
-    {
-        PcRiskFlag.LocalProcessLaunch => "Allow the PC agent to launch a trusted local process?",
-        PcRiskFlag.ExternalCommunication => "Allow the PC agent to send or submit information externally?",
-        PcRiskFlag.RemoteContentChange => "Allow the PC agent to modify or delete remote content or social state?",
-        PcRiskFlag.LocalDeletion => "Allow the PC agent to delete a local item?",
-        PcRiskFlag.CredentialEntry => "Allow the PC agent to enter credentials?",
-        PcRiskFlag.PurchaseOrFinancial => "Allow the PC agent to perform a purchase or financial action?",
-        PcRiskFlag.AccountOrPermissionChange => "Allow the PC agent to change an account or permission?",
-        PcRiskFlag.DownloadOrInstall => "Allow the PC agent to download or install software?",
-        PcRiskFlag.UnclassifiedSensitiveAction => "Allow the PC agent to perform the pending sensitive action?",
-        _ => "Allow the pending sensitive action?",
-    };
-
-    private static PcRiskFlag? RequiredRunbookRisk(string effect)
-        => effect == "none"
-            ? null
-            : PcAgentDecisionParser.TryParseRisk(effect, out var risk)
-                ? risk
-                : throw new InvalidOperationException("The trusted runbook step declares an unsupported effect.");
-
-    private static bool ScopeAllowsRisk(PcRunScope scope, PcRiskFlag risk) => risk switch
-    {
-        PcRiskFlag.LocalProcessLaunch => scope.AllowLocalProcessLaunches,
-        PcRiskFlag.ExternalCommunication => scope.AllowExternalCommunication,
-        PcRiskFlag.RemoteContentChange => scope.AllowRemoteContentChanges,
-        PcRiskFlag.LocalDeletion => scope.AllowLocalDeletion,
-        _ => false,
-    };
-
     private static string BoundSummary(string summary)
         => summary.Length <= SecurityLimits.MaxAgentSummaryCharacters
             ? summary
@@ -1080,11 +847,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         internal int ModelTurns { get; set; }
         internal int ActionsExecuted { get; set; }
         internal long ActiveElapsedMilliseconds { get; set; }
-        internal PcRiskFlag? ApprovedRisk { get; set; }
-        internal PcRunbookStepReference? ApprovedRunbookStep { get; set; }
-        internal PcRunbookStepReference? PendingRunbookApprovalStep { get; set; }
-        internal HashSet<PcRiskFlag> ApprovedRunbookRisks { get; } = [];
-        internal PcConfirmation? Confirmation { get; set; }
         internal PcHandoff? Handoff { get; set; }
         internal string PendingOuterContext { get; set; } = request.ExecutionContext;
         internal string PendingRetrievedContext { get; set; } = "";
@@ -1133,11 +895,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         {
             State = AgentWorkingState.Empty;
             RecentOutcomes.Clear();
-            ApprovedRisk = null;
-            ApprovedRunbookStep = null;
-            PendingRunbookApprovalStep = null;
-            ApprovedRunbookRisks.Clear();
-            Confirmation = null;
             Handoff = null;
             PendingOuterContext = "";
             PendingRetrievedContext = "";

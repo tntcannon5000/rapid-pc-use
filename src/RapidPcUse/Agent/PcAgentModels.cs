@@ -5,12 +5,10 @@ namespace RapidPcUse.Agent;
 internal enum PcAgentStatus
 {
     Completed,
-    NeedsConfirmation,
     NeedsHandoff,
     Blocked,
     LimitReached,
     Failed,
-    Denied,
     UserTakeover,
 }
 
@@ -20,7 +18,6 @@ internal enum PcAgentDecisionKind
     Retrieve,
     RunbookStep,
     Finish,
-    Confirm,
     Handoff,
     Blocked,
 }
@@ -34,28 +31,6 @@ internal enum PcHandoffReason
     UnsupportedCapability,
 }
 
-internal enum PcRiskFlag
-{
-    LocalProcessLaunch,
-    ExternalCommunication,
-    RemoteContentChange,
-    LocalDeletion,
-    CredentialEntry,
-    PurchaseOrFinancial,
-    AccountOrPermissionChange,
-    DownloadOrInstall,
-    UnclassifiedSensitiveAction,
-}
-
-internal sealed record PcRunScope(
-    bool AllowExternalCommunication,
-    bool AllowRemoteContentChanges,
-    bool AllowLocalDeletion,
-    bool AllowCredentials,
-    bool AllowPurchases,
-    bool AllowAccountOrPermissionChanges,
-    bool AllowLocalProcessLaunches = false);
-
 internal sealed record PcRunLimits(
     int MaxModelTurns,
     int MaxActions,
@@ -64,7 +39,6 @@ internal sealed record PcRunLimits(
 
 internal sealed record PcRunRequest(
     string Task,
-    PcRunScope Scope,
     PcRunLimits Limits,
     bool ReturnFinalScreenshot,
     string ExecutionContext = "",
@@ -92,7 +66,6 @@ internal sealed record ActDecision(
     JsonElement Actions,
     AgentWorkingState NextState,
     string ExpectedChange,
-    IReadOnlySet<PcRiskFlag> RiskFlags,
     string CompletionGuardText = "",
     string CompletionSummary = "")
     : PcAgentDecision(PcAgentDecisionKind.Act, NextState);
@@ -115,12 +88,6 @@ internal sealed record FinishDecision(
     string VisibleEvidence)
     : PcAgentDecision(PcAgentDecisionKind.Finish, FinalState);
 
-internal sealed record ConfirmDecision(
-    string OperationSummary,
-    PcRiskFlag Risk,
-    AgentWorkingState NextState)
-    : PcAgentDecision(PcAgentDecisionKind.Confirm, NextState);
-
 internal sealed record HandoffDecision(
     PcHandoffReason Reason,
     string Request,
@@ -135,13 +102,11 @@ internal sealed record BlockedDecision(
 
 internal sealed record PcModelTurnRequest(
     string Task,
-    PcRunScope Scope,
     AgentWorkingState State,
     IReadOnlyList<AgentActionOutcome> RecentOutcomes,
     Observation Observation,
     int Turn,
     int RemainingActions,
-    PcRiskFlag? ApprovedRisk,
     string RunId = "",
     string OuterContext = "",
     string RetrievedContext = "");
@@ -177,12 +142,6 @@ internal sealed record PcModelTurnResult(
     ProviderTurnTimings Timings,
     ProviderUsage Usage);
 
-internal sealed record PcConfirmation(
-    string ConfirmationId,
-    string OperationSummary,
-    PcRiskFlag Risk,
-    DateTimeOffset ExpiresUtc);
-
 internal sealed record PcHandoff(
     string HandoffId,
     PcHandoffReason Reason,
@@ -197,7 +156,6 @@ internal sealed record PcRunResult(
     int ActionsExecuted,
     long ElapsedMilliseconds,
     string TelemetrySessionId,
-    PcConfirmation? Confirmation,
     PcHandoff? Handoff,
     Observation? FinalObservation,
     string? Code = null,

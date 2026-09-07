@@ -27,22 +27,6 @@ $discord = New-RapidPcRealWorldScenario -Id 'discord-dm' -Config $config -Nonce 
 $youtube = New-RapidPcRealWorldScenario -Id 'youtube' -Config $config -Nonce 'scope-test'
 $amazon = New-RapidPcRealWorldScenario -Id 'amazon-orders' -Config $config -Nonce 'scope-test'
 
-$discordScope = New-RapidPcBenchmarkScope -Scenario $discord -SupportsRemoteContentScope $true
-Assert-Test ($discordScope.allow_external_communication -eq $true) 'Discord scope omitted external communication.'
-Assert-Test ($discordScope.allow_remote_content_changes -eq $true) 'Discord scope omitted remote mutation.'
-Assert-Test ($discordScope.allow_local_deletion -eq $false) 'New-contract Discord scope granted local deletion.'
-$legacyDiscordScope = New-RapidPcBenchmarkScope -Scenario $discord -SupportsRemoteContentScope $false
-Assert-Test ($legacyDiscordScope.allow_local_deletion -eq $true) 'Legacy Discord scope cannot authorize its remote DELETE chord.'
-Assert-Test (-not $legacyDiscordScope.ContainsKey('allow_remote_content_changes')) 'Legacy scope sent an unsupported field.'
-
-$youtubeScope = New-RapidPcBenchmarkScope -Scenario $youtube -SupportsRemoteContentScope $true
-Assert-Test ($youtubeScope.allow_external_communication -eq $false) 'YouTube scope granted external communication.'
-Assert-Test ($youtubeScope.allow_remote_content_changes -eq $true) 'YouTube scope omitted remote state changes.'
-Assert-Test ($youtubeScope.allow_local_deletion -eq $false) 'YouTube scope granted local deletion.'
-
-$amazonScope = New-RapidPcBenchmarkScope -Scenario $amazon -SupportsRemoteContentScope $true
-Assert-Test ($amazonScope.Values -notcontains $true) 'Read-only Amazon scope granted mutating authority.'
-
 Assert-RapidPcBenchmarkSchedulePolicy `
     -Scenarios @('amazon-orders') `
     -Models @('gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol') `

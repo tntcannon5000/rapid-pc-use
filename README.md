@@ -53,7 +53,7 @@ Hybrid workflows are encouraged: a trusted direct command can inspect state or l
 
 The active performance contract, measured baselines, and medium-horizon architecture plan live in [`docs/PERFORMANCE_ROADMAP.md`](./docs/PERFORMANCE_ROADMAP.md).
 
-When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. It can include a compact first-turn execution brief and a strictly validated direct HTTP(S) or `discord:` launch. The driver automatically retrieves matching trusted local facts and structured runbooks before turn one; the inner controller can issue a later semantic query without returning to outer Codex. It can then select an opaque step ID for an exact stored local process launch, a fixed direct `.exe` invocation with fixed arguments and bounded output, or a fixed loopback app-interface call. It never supplies an executable path, command, URL, request body, argument, environment variable, or stdin. Rapid PC Use owns the screenshot → model → native action loop and returns a compact completion, blocker, limit, confirmation, or bounded outer-assistance result. Local process launches and commands require `allow_local_process_launches` or one-shot confirmation; a mutating command or app step independently requires its declared effect authority.
+When an inner model provider is configured, Codex starts visible-PC work with one `pc_run` call. It can include a compact first-turn execution brief and a strictly validated direct HTTP(S) or `discord:` launch. The driver automatically retrieves matching trusted local facts and structured runbooks before turn one; the inner controller can issue a later semantic query without returning to outer Codex. It can then select an opaque step ID for an exact stored local process launch, a fixed direct `.exe` invocation with fixed arguments and bounded output, or a fixed loopback app-interface call. It never supplies an executable path, command, URL, request body, argument, environment variable, or stdin. Rapid PC Use owns the screenshot → model → native action loop and returns a compact completion, blocker, limit, or bounded outer-assistance result. Trusted runbook steps execute directly inside that loop without a second operation-specific approval protocol.
 
 Pointer activations have a native, cancellation-aware 80 ms button-up-to-button-down floor. The model still chooses longer waits at UI dependency frontiers, and every action batch is followed by a fresh capture before the next inner decision.
 
@@ -111,7 +111,7 @@ Configuration is read once when the driver starts:
 | `RAPID_PC_AGENT_IMAGE_DETAIL` | `original` after local 720p/900p downscaling |
 | `RAPID_PC_AGENT_CODEX_PATH` | Automatic: newest Codex desktop runtime, then `codex.exe` on `PATH` |
 
-Invalid or unavailable agent configuration disables only `pc_run`/`pc_resume`/`pc_continue`; it never prevents the native driver, knowledge tools, or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
+Invalid or unavailable agent configuration disables only `pc_run`/`pc_continue`; it never prevents the native driver, knowledge tools, or low-level tools from starting. Transient provider and malformed-response failures are retried up to two times against the same configured endpoint before any native action executes. The driver never silently fails over to another provider.
 
 ## Real-world benchmark
 

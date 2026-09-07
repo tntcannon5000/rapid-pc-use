@@ -20,7 +20,6 @@ internal static class AgentTelemetry
                 no_progress_limit = request.Limits.MaxConsecutiveNoProgressTurns,
                 execution_context_characters = request.ExecutionContext.Length,
                 direct_launch_requested = !string.IsNullOrWhiteSpace(request.LaunchUri),
-                allow_local_process_launches = request.Scope.AllowLocalProcessLaunches,
             });
 
     internal static void KnowledgeRetrieved(string runId, int turn, PcRouteRetrievalResult result)
@@ -186,19 +185,6 @@ internal static class AgentTelemetry
                 local_timings_us = result.LocalTimings,
                 timings_us = result.Timings,
                 usage = result.Usage,
-            });
-
-    internal static void PolicyEvaluated(string runId, int turn, int actionCount, long elapsedMicroseconds)
-        => DriverLog.Info(
-            "agent.policy_evaluated",
-            "The internal PC agent evaluated the local action policy.",
-            operationId: runId,
-            tool: "pc_run",
-            data: new
-            {
-                turn,
-                action_count = actionCount,
-                elapsed_us = elapsedMicroseconds,
             });
 
     internal static void CompletionGuardEvaluated(string runId, int turn, CompletionGuardResult result)
@@ -380,12 +366,10 @@ internal static class AgentTelemetry
     private static string StatusName(PcAgentStatus status) => status switch
     {
         PcAgentStatus.Completed => "completed",
-        PcAgentStatus.NeedsConfirmation => "needs_confirmation",
         PcAgentStatus.NeedsHandoff => "needs_handoff",
         PcAgentStatus.Blocked => "blocked",
         PcAgentStatus.LimitReached => "limit_reached",
         PcAgentStatus.Failed => "failed",
-        PcAgentStatus.Denied => "denied",
         PcAgentStatus.UserTakeover => "user_takeover",
         _ => "failed",
     };

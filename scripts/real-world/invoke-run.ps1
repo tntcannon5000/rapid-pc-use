@@ -59,16 +59,11 @@ function Invoke-RapidPcRealWorldRun {
             throw 'The selected executable does not advertise pc_run.'
         }
         $runProperties = $pcRun.inputSchema.properties
-        $scopeProperties = $runProperties.scope.properties
-        $supportsRemoteContentScope = $null -ne $scopeProperties.PSObject.Properties['allow_remote_content_changes']
         $supportsDirectLaunch = $null -ne $runProperties.PSObject.Properties['launch_uri']
         $supportsExecutionContext = $null -ne $runProperties.PSObject.Properties['execution_context']
 
-        $scope = New-RapidPcBenchmarkScope -Scenario $Scenario -SupportsRemoteContentScope $supportsRemoteContentScope
-
         $runArguments = @{
             task = [string]$Scenario.Task
-            scope = $scope
             limits = @{
                 max_model_turns = 50
                 max_actions = 256
@@ -242,28 +237,6 @@ function Stop-RapidPcBenchmarkDriver {
     }
 
     try { return $Process.WaitForExit(5000) } catch { return $false }
-}
-
-function New-RapidPcBenchmarkScope {
-    param(
-        [Parameter(Mandatory)][object]$Scenario,
-        [Parameter(Mandatory)][bool]$SupportsRemoteContentScope
-    )
-
-    $scope = @{
-        allow_external_communication = [bool]$Scenario.AllowExternalCommunication
-        # The legacy build inferred the DELETE key as local deletion even
-        # inside remote apps, so retain this only for baseline compatibility.
-        allow_local_deletion = -not $SupportsRemoteContentScope -and [bool]$Scenario.AllowLegacyLocalDeletion
-        allow_credentials = $false
-        allow_purchases = $false
-        allow_account_or_permission_changes = $false
-    }
-    if ($SupportsRemoteContentScope) {
-        $scope.allow_remote_content_changes = [bool]$Scenario.AllowRemoteContentChanges
-    }
-
-    return $scope
 }
 
 function Resolve-RapidPcBenchmarkHandoff {

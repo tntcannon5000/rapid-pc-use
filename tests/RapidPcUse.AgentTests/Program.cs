@@ -65,9 +65,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
     ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
-    ("cross-host contention cannot replay a paused continuation", McpResumeReportsControlBusyAsNonReplayable),
     ("blocked native input fails before the model and releases control", McpRunReportsInputUnavailableWithoutFailure),
-    ("blocked input cannot replay a paused continuation", McpResumeReportsInputUnavailableAsNonReplayable),
     ("MCP pc_run uses trusted fast start context once before the first model turn", McpRunUsesTrustedFastStart),
     ("trusted fast start fails closed before a model sees the wrong foreground", FastStartActivationFailureBlocksBeforeModel),
     ("MCP pc_act returns recoverable validation feedback without stopping control", McpActValidationIsRecoverable),
@@ -82,19 +80,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("public and inner scroll schemas publish model-native delta limits", ScrollSchemasUseSharedLimits),
     ("MCP knowledge update schema matches operation-specific handler inputs", McpKnowledgeUpdateSchemaMatchesHandler),
     ("MCP knowledge failure preserves a paused desktop run", McpKnowledgeFailurePreservesPausedRun),
-    ("confirmation pauses and resumes without retaining a frame", ConfirmationPausesAndResumes),
     ("outer assistance pauses and continues without carrying approval", HandoffPausesAndContinues),
     ("outer assistance expires and requires a nonempty schema request", HandoffExpiryAndSchemaAreBounded),
-    ("outer assistance clears one-shot confirmation authority", HandoffClearsApprovedRisk),
-    ("remote content changes use their own authority boundary", RemoteContentChangeUsesDedicatedScope),
     ("PC knowledge persists bounded versioned facts atomically", RunbookFeatureTests.KnowledgeStorePersistsBoundedFacts),
     ("PC knowledge rejects oversized updates without replacing the store", RunbookFeatureTests.KnowledgeStoreRejectsOversizedUpdates),
     ("driver-local retrieval and runbook launch stay inside the fast loop", RunbookFeatureTests.LocalRouteStaysInsideFastLoop),
     ("runbook steps require retrieval in the current run", RunbookFeatureTests.UnretrievedRunbookIsRejected),
     ("runbook execution is bound to the exact retrieved step snapshot", RunbookFeatureTests.InventedRunbookStepIsRejected),
-    ("local runbook launch has an explicit one-shot authority boundary", RunbookFeatureTests.RunbookLaunchRequiresAuthority),
-    ("trusted local app steps enforce their declared effect authority", RunbookFeatureTests.RunbookEffectRequiresAuthority),
-    ("effectful process steps accumulate exact one-shot authority", RunbookFeatureTests.EffectfulProcessAccumulatesExactAuthority),
+    ("trusted local runbook launch executes inside the fast loop", RunbookFeatureTests.RunbookLaunchExecutesDirectly),
+    ("trusted effectful runbook executes inside the fast loop", RunbookFeatureTests.RunbookEffectExecutesDirectly),
+    ("effectful process runbook executes exactly once", RunbookFeatureTests.EffectfulProcessExecutesExactlyOnce),
     ("effectful runbook attempts consume budget and cannot be repeated", RunbookFeatureTests.EffectfulRunbookAttemptIsAtMostOnce),
     ("irrelevant fuzzy runbooks do not arm finish verifiers", RunbookFeatureTests.IrrelevantRunbookDoesNotGateFinish),
     ("required read-only runbook verification blocks premature finish", RunbookFeatureTests.RequiredRunbookVerificationBlocksFinish),
@@ -199,13 +194,11 @@ static Task CodexSessionRequestIsBounded()
 
     var request = new PcModelTurnRequest(
         "Open the harmless fixture.",
-        Scope(),
         new AgentWorkingState("Only compact memory", [], "", [], []),
         [],
         Observation(1, [1, 2, 3]),
         2,
         10,
-        null,
         "run-1");
     var images = new[] { @"C:\Temp\current-1.jpg", @"C:\Temp\current-2.jpg" };
     using var turnDocument = JsonDocument.Parse(provider.BuildTurnStartRequest(8, "thread-1", request, images));
@@ -218,7 +211,7 @@ static Task CodexSessionRequestIsBounded()
     Assert(!turn.GetRawText().Contains("previous_response", StringComparison.OrdinalIgnoreCase),
         "a decision turn must not chain prior screenshot context");
 
-    const string output = "{\"decision\":\"finish\",\"actions\":[],\"memory\":\"Visible\",\"expected_change\":\"\",\"risk_flags\":[],\"summary\":\"Done\",\"visible_evidence\":\"Fixture visible\",\"operation_summary\":\"\",\"risk\":\"none\",\"reason\":\"\"}";
+    const string output = "{\"decision\":\"finish\",\"actions\":[],\"memory\":\"Visible\",\"expected_change\":\"\",\"summary\":\"Done\",\"visible_evidence\":\"Fixture visible\",\"reason\":\"\"}";
     Assert(PcAgentDecisionParser.ParseStructured(output) is FinishDecision { Summary: "Done" },
         "structured Codex output did not parse");
     return Task.CompletedTask;
@@ -239,13 +232,11 @@ static async Task CodexSessionLiveTurn()
     var result = await provider.DecideAsync(
         new PcModelTurnRequest(
             "This is a provider protocol test. Do not act. Return blocked because the blank fixture has no actionable UI.",
-            Scope(),
             AgentWorkingState.Empty,
             [],
             Observation(1, jpeg),
             1,
             1,
-            null,
             "live-probe"),
         timeout.Token);
     Assert(result.Decision is BlockedDecision or FinishDecision, "live Codex turn returned an unexpected decision");
@@ -259,13 +250,11 @@ static Task OpenAiRequestIsBounded()
     var observation = Observation(1, [1, 2, 3, 4]);
     var request = new PcModelTurnRequest(
         "Open the harmless fixture.",
-        Scope(),
         AgentWorkingState.Empty,
         [],
         observation,
         1,
-        10,
-        null);
+        10);
     var payload = provider.BuildRequest(request);
     using var document = JsonDocument.Parse(payload);
     var root = document.RootElement;
@@ -287,13 +276,11 @@ static Task OpenAiRequestUsesConfiguredServiceTier()
     using var provider = new OpenAiResponsesProvider("test-key", options, new HttpClient(new NeverSendHandler()));
     var payload = provider.BuildRequest(new PcModelTurnRequest(
         "Open the harmless fixture.",
-        Scope(),
         AgentWorkingState.Empty,
         [],
         Observation(1, [1]),
         1,
-        10,
-        null));
+        10));
     using var document = JsonDocument.Parse(payload);
     Assert(document.RootElement.GetProperty("service_tier").GetString() == "flex",
         "the direct Responses request ignored the configured service tier");
@@ -324,7 +311,7 @@ static async Task OpenAiStreamingDecisionParses()
     var handler = new SseHandler(stream);
     using var provider = new OpenAiResponsesProvider("test-key", Options(), new HttpClient(handler));
     var result = await provider.DecideAsync(
-        new PcModelTurnRequest("Open fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+        new PcModelTurnRequest("Open fixture.", AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10),
         CancellationToken.None);
     Assert(result.Decision is FinishDecision { Summary: "Done" }, "finish decision was not parsed");
     Assert(result.Usage.InputTokens == 1200 && result.Usage.CachedInputTokens == 1024, "usage counters were not parsed");
@@ -391,13 +378,11 @@ static async Task BrokerProviderReturnsStructuredDecision()
     var result = await provider.DecideAsync(
         new PcModelTurnRequest(
             "Complete fixture.",
-            Scope(),
             AgentWorkingState.Empty,
             [],
             Observation(1, [1, 2, 3]),
             1,
             10,
-            null,
             "broker-test"),
         CancellationToken.None);
     await serverTask;
@@ -437,7 +422,7 @@ static async Task BrokerProviderRejectsMismatchedIdentity()
     using var provider = new BrokeredModelProvider(Options() with { Provider = "broker" }, pipeName, token);
     await ExpectAsync<InvalidOperationException>(() => provider.DecideAsync(
         new PcModelTurnRequest(
-            "Complete fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+            "Complete fixture.", AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10),
         CancellationToken.None));
     await serverTask;
 }
@@ -452,7 +437,7 @@ static async Task ProviderFailureIsRedacted()
     try
     {
         _ = await provider.DecideAsync(
-            new PcModelTurnRequest("Open fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+            new PcModelTurnRequest("Open fixture.", AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10),
             CancellationToken.None);
     }
     catch (PcAgentProviderException exception)
@@ -473,7 +458,7 @@ static async Task TruncatedProviderStreamFailsClosed()
     await ExpectAsync<InvalidOperationException>(async () =>
     {
         _ = await provider.DecideAsync(
-            new PcModelTurnRequest("Open fixture.", Scope(), AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10, null),
+            new PcModelTurnRequest("Open fixture.", AgentWorkingState.Empty, [], Observation(1, [1]), 1, 10),
             CancellationToken.None);
     });
 }
@@ -484,7 +469,7 @@ static Task ReplayLoopCompletes()
     var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Target changes", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target changes"),
         new FinishDecision("Fixture completed.", state, "Target changed"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
@@ -507,7 +492,6 @@ static Task CompletionGuardEliminatesFinalModelBarrier()
             actions.RootElement.Clone(),
             state,
             "Completion banner appears",
-            new HashSet<PcRiskFlag>(),
             "FIXTURE COMPLETE",
             "Fixture completed."),
     ]);
@@ -540,7 +524,6 @@ static Task UnmatchedCompletionGuardFallsBack()
             actions.RootElement.Clone(),
             state,
             "Completion banner appears",
-            new HashSet<PcRiskFlag>(),
             "FIXTURE COMPLETE",
             "Fixture completed."),
         new FinishDecision("Fixture verified by the model.", state, "Target changed"),
@@ -597,12 +580,9 @@ static Task McpRunSchemaOmitsProcessLock()
     var pcRun = response.RootElement.GetProperty("result").GetProperty("tools")
         .EnumerateArray()
         .Single(tool => tool.GetProperty("name").GetString() == "pc_run");
-    var scopeProperties = pcRun.GetProperty("inputSchema")
-        .GetProperty("properties")
-        .GetProperty("scope")
-        .GetProperty("properties");
-    Assert(!scopeProperties.TryGetProperty("allowed_processes", out _),
-        "pc_run still exposes the foreground process lock");
+    var properties = pcRun.GetProperty("inputSchema").GetProperty("properties");
+    Assert(!properties.TryGetProperty("scope", out _),
+        "pc_run still exposes the removed operation-approval scope");
     return Task.CompletedTask;
 }
 
@@ -612,7 +592,7 @@ static Task McpRunNormalizesOversizedBudgets()
     using var provider = new ReplayPcModelProvider([new FinishDecision("Fixture completed.", state, "Visible fixture")]);
     using var desktop = new FakeDesktop([Observation(1, [1, 2, 3])]);
     using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Configure a VIMLE sofa without purchasing it.\",\"scope\":{\"allow_external_communication\":false,\"allow_local_deletion\":false,\"allow_credentials\":false,\"allow_purchases\":false,\"allow_account_or_permission_changes\":false},\"limits\":{\"max_duration_ms\":600000,\"max_actions\":200,\"max_model_turns\":50,\"max_consecutive_no_progress_turns\":8},\"return_final_screenshot\":false}}}\n";
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Configure a VIMLE sofa without purchasing it.\",\"limits\":{\"max_duration_ms\":600000,\"max_actions\":200,\"max_model_turns\":50,\"max_consecutive_no_progress_turns\":8},\"return_final_screenshot\":false}}}\n";
     using var reader = new StringReader(input);
     using var writer = new StringWriter();
     var server = new McpServer(desktop, loop, reader, writer);
@@ -631,7 +611,7 @@ static Task McpRunRejectsInvalidArgumentsWithoutFailure()
     using var provider = new RecordingProvider([]);
     using var desktop = new FakeDesktop([]);
     using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allow_external_communication\":\"yes\"}}}}\n";
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"return_final_screenshot\":\"yes\"}}}\n";
     using var reader = new StringReader(input);
     using var writer = new StringWriter();
     new McpServer(desktop, loop, reader, writer).Run();
@@ -667,46 +647,6 @@ static Task McpRunReportsControlBusyWithoutFailure()
     return Task.CompletedTask;
 }
 
-static Task McpResumeReportsControlBusyAsNonReplayable()
-{
-    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
-    ]);
-    using var desktop = new ReacquireControlBusyDesktop(Observation(1, [1]));
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    var paused = loop.Run(Request(maxNoProgress: 3));
-    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
-    var input = JsonSerializer.Serialize(new
-    {
-        jsonrpc = "2.0",
-        id = 1,
-        method = "tools/call",
-        @params = new
-        {
-            name = "pc_resume",
-            arguments = new
-            {
-                session_id = paused.SessionId,
-                confirmation_id = confirmation.ConfirmationId,
-                decision = "approve_once",
-            },
-        },
-    }) + "\n";
-    using var reader = new StringReader(input);
-    using var writer = new StringWriter();
-    new McpServer(desktop, loop, reader, writer).Run();
-    using var response = JsonDocument.Parse(writer.ToString().Trim());
-    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
-    Assert(structured.GetProperty("status").GetString() == "blocked", "contended continuation did not block");
-    Assert(structured.GetProperty("code").GetString() == "desktop_control_busy", "contended continuation lost its reason code");
-    Assert(!structured.GetProperty("retryable").GetBoolean(), "contended continuation was incorrectly replayable");
-    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "contended continuation did not guarantee zero new actions");
-    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "contended continuation changed visible desktop state");
-    return Task.CompletedTask;
-}
-
 static Task McpRunReportsInputUnavailableWithoutFailure()
 {
     using var provider = new RecordingProvider([]);
@@ -731,54 +671,13 @@ static Task McpRunReportsInputUnavailableWithoutFailure()
     return Task.CompletedTask;
 }
 
-static Task McpResumeReportsInputUnavailableAsNonReplayable()
-{
-    var state = new AgentWorkingState("Fixture visible", [], "Await approval", [], []);
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ConfirmDecision("Use the harmless fixture credential.", PcRiskFlag.CredentialEntry, state),
-    ]);
-    using var desktop = new ReacquireInputUnavailableDesktop(Observation(1, [1]));
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    var paused = loop.Run(Request(maxNoProgress: 3));
-    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("fixture confirmation is missing");
-    var input = JsonSerializer.Serialize(new
-    {
-        jsonrpc = "2.0",
-        id = 1,
-        method = "tools/call",
-        @params = new
-        {
-            name = "pc_resume",
-            arguments = new
-            {
-                session_id = paused.SessionId,
-                confirmation_id = confirmation.ConfirmationId,
-                decision = "approve_once",
-            },
-        },
-    }) + "\n";
-    using var reader = new StringReader(input);
-    using var writer = new StringWriter();
-    new McpServer(desktop, loop, reader, writer).Run();
-    using var response = JsonDocument.Parse(writer.ToString().Trim());
-    var structured = response.RootElement.GetProperty("result").GetProperty("structuredContent");
-    Assert(structured.GetProperty("status").GetString() == "blocked", "failed continuation reacquisition did not block");
-    Assert(structured.GetProperty("code").GetString() == "desktop_input_blocked", "failed continuation reacquisition lost its reason code");
-    Assert(!structured.GetProperty("retryable").GetBoolean(), "failed continuation reacquisition was incorrectly replayable");
-    Assert(structured.GetProperty("no_actions_executed").GetBoolean(), "failed continuation reacquisition did not guarantee zero new actions");
-    Assert(structured.GetProperty("state_unchanged").GetBoolean(), "failed continuation reacquisition changed visible desktop state");
-    Assert(structured.GetProperty("control_released").GetBoolean(), "failed continuation reacquisition retained control");
-    return Task.CompletedTask;
-}
-
 static Task McpRunUsesTrustedFastStart()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"wait\",\"ms\":0}]");
     var state = new AgentWorkingState("Fixture visible", [], "Finish", [], []);
     using var provider = new RecordingProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Fixture settles", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Fixture settles"),
         new FinishDecision("Fixture completed.", state, "Fixture visible"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
@@ -923,13 +822,11 @@ static Task ScrollSchemasUseSharedLimits()
     using var provider = new OpenAiResponsesProvider("test-key", options, new HttpClient(new NeverSendHandler()));
     var payload = provider.BuildRequest(new PcModelTurnRequest(
         "Scroll the fixture.",
-        Scope(),
         AgentWorkingState.Empty,
         [],
         Observation(1, [1]),
         1,
-        10,
-        null));
+        10));
     using var providerRequest = JsonDocument.Parse(payload);
     var computerAct = providerRequest.RootElement.GetProperty("tools")
         .EnumerateArray()
@@ -1038,8 +935,8 @@ static Task AgentLoopCorrectsRejectedAction()
     var state = new AgentWorkingState("Fixture visible", [], "Scroll modestly", [], []);
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(invalid.RootElement.Clone(), state, "List moves", new HashSet<PcRiskFlag>()),
-        new ActDecision(corrected.RootElement.Clone(), state, "List moves", new HashSet<PcRiskFlag>()),
+        new ActDecision(invalid.RootElement.Clone(), state, "List moves"),
+        new ActDecision(corrected.RootElement.Clone(), state, "List moves"),
         new FinishDecision("Fixture completed.", state, "Target is visible"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
@@ -1101,7 +998,7 @@ static Task PartialExecutionRecovers()
     var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Change", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Change"),
         new FinishDecision("Recovered.", state, "Visible fixture"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
@@ -1119,8 +1016,8 @@ static Task RepeatedPointerSuppressionBlocks()
     var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
-        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates"),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates"),
         new FinishDecision("Should not be reached.", state, "Target active"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
@@ -1142,8 +1039,8 @@ static Task McpRunPreservesPointerFailureCode()
     var state = new AgentWorkingState("Fixture visible", [], "Click target", [], []);
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
-        new ActDecision(actions.RootElement.Clone(), state, "Target activates", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates"),
+        new ActDecision(actions.RootElement.Clone(), state, "Target activates"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [1]), Observation(3, [1])]);
     desktop.InterruptNextAct(completedActions: 0, failureCode: "button_down_failed");
@@ -1161,31 +1058,6 @@ static Task McpRunPreservesPointerFailureCode()
     return Task.CompletedTask;
 }
 
-static Task ConfirmationPausesAndResumes()
-{
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
-    var state = new AgentWorkingState("Credential field visible", [], "Enter fixture", [], []);
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ActDecision(actions.RootElement.Clone(), state, "Field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
-        new ActDecision(actions.RootElement.Clone(), state, "Field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
-        new FinishDecision("Credential fixture completed.", state, "Field contains fixture"),
-    ]);
-    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    var paused = loop.Run(Request(maxNoProgress: 3));
-    Assert(paused.Status == PcAgentStatus.NeedsConfirmation && paused.Confirmation is not null, "run did not pause");
-    var confirmation = paused.Confirmation ?? throw new InvalidOperationException("confirmation is missing");
-    Assert(desktop.ActionBatches.Count == 0, "sensitive action executed before confirmation");
-    Assert(desktop.StopCount == 1, "pause did not release visible control");
-    Assert(loop.RetainedImageCount == 0, "paused run retained a screenshot");
-    var completed = loop.Resume(paused.SessionId, confirmation.ConfirmationId, approve: true);
-    Assert(completed.Status == PcAgentStatus.Completed, "approved run did not resume to completion");
-    Assert(desktop.ActionBatches.Count == 1, "approved action did not execute exactly once");
-    Assert(desktop.StopCount == 2, "resumed run did not release control");
-    return Task.CompletedTask;
-}
-
 static Task HandoffPausesAndContinues()
 {
     var state = new AgentWorkingState("Fixture visible", [], "Resolve the app route", [], []);
@@ -1198,7 +1070,6 @@ static Task HandoffPausesAndContinues()
     using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
     var paused = loop.Run(Request(maxNoProgress: 3));
     Assert(paused.Status == PcAgentStatus.NeedsHandoff && paused.Handoff is not null, "run did not request outer assistance");
-    Assert(paused.Confirmation is null, "handoff was confused with confirmation");
     Assert(desktop.StopCount == 1 && loop.RetainedImageCount == 0, "handoff retained desktop control or images");
     var handoff = paused.Handoff ?? throw new InvalidOperationException("handoff is missing");
     Expect<InvalidOperationException>(() => loop.ResumeHandoff("wrong-session", handoff.HandoffId, "Verified route."));
@@ -1230,13 +1101,11 @@ static Task HandoffExpiryAndSchemaAreBounded()
     using var schemaProvider = new OpenAiResponsesProvider("test-key", Options(), new HttpClient(new NeverSendHandler()));
     var payload = schemaProvider.BuildRequest(new PcModelTurnRequest(
         "Resolve the fixture route.",
-        Scope(),
         AgentWorkingState.Empty,
         [],
         Observation(2, [2]),
         1,
-        10,
-        null));
+        10));
     using var request = JsonDocument.Parse(payload);
     var handoffRequest = request.RootElement.GetProperty("tools")
         .EnumerateArray()
@@ -1248,62 +1117,15 @@ static Task HandoffExpiryAndSchemaAreBounded()
     return Task.CompletedTask;
 }
 
-static Task HandoffClearsApprovedRisk()
-{
-    using var actions = JsonDocument.Parse("[{\"type\":\"type\",\"text\":\"fixture\",\"interval_ms\":5}]");
-    var state = new AgentWorkingState("Fixture visible", [], "Continue", [], []);
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
-        new HandoffDecision(PcHandoffReason.NeedKnowledge, "Resolve the verified route.", state),
-        new ActDecision(actions.RootElement.Clone(), state, "Sensitive field changes", new HashSet<PcRiskFlag> { PcRiskFlag.CredentialEntry }),
-    ]);
-    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2]), Observation(3, [3])]);
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    var confirmationPause = loop.Run(Request(maxNoProgress: 3));
-    var confirmation = confirmationPause.Confirmation ?? throw new InvalidOperationException("confirmation is missing");
-    var handoffPause = loop.Resume(confirmationPause.SessionId, confirmation.ConfirmationId, approve: true);
-    var handoff = handoffPause.Handoff ?? throw new InvalidOperationException("handoff is missing");
-    var secondConfirmation = loop.ResumeHandoff(handoffPause.SessionId, handoff.HandoffId, "Verified route.");
-    Assert(secondConfirmation.Status == PcAgentStatus.NeedsConfirmation,
-        "one-shot confirmation authority crossed the handoff boundary");
-    Assert(desktop.ActionBatches.Count == 0, "sensitive action executed with stale approval");
-    return Task.CompletedTask;
-}
-
-static Task RemoteContentChangeUsesDedicatedScope()
-{
-    using var actions = JsonDocument.Parse("[{\"type\":\"key\",\"keys\":\"DELETE\"}]");
-    var decision = new ActDecision(
-        actions.RootElement.Clone(),
-        AgentWorkingState.Empty,
-        "Remote message is removed",
-        new HashSet<PcRiskFlag> { PcRiskFlag.RemoteContentChange });
-    var denied = ActionPolicy.Evaluate(decision, Scope(), approvedRisk: null);
-    Assert(denied.ConfirmationRisk == PcRiskFlag.RemoteContentChange, "remote mutation did not request its dedicated authority");
-    var remoteOnly = ActionPolicy.Evaluate(
-        decision,
-        Scope() with { AllowRemoteContentChanges = true },
-        approvedRisk: null);
-    Assert(remoteOnly.ConfirmationRisk == PcRiskFlag.LocalDeletion,
-        "a model-declared remote risk suppressed the driver's DELETE inference");
-    var allowed = ActionPolicy.Evaluate(
-        decision,
-        Scope() with { AllowRemoteContentChanges = true, AllowLocalDeletion = true },
-        approvedRisk: null);
-    Assert(allowed.Allowed && allowed.ConfirmationRisk is null, "fully scoped remote DELETE did not pass policy");
-    return Task.CompletedTask;
-}
-
 static Task NoProgressRecovers()
 {
     using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
     var state = AgentWorkingState.Empty;
     using var provider = new ReplayPcModelProvider(
     [
-        new ActDecision(actions.RootElement.Clone(), state, "Change", new HashSet<PcRiskFlag>()),
-        new ActDecision(actions.RootElement.Clone(), state, "Change", new HashSet<PcRiskFlag>()),
-        new ActDecision(actions.RootElement.Clone(), state, "Change", new HashSet<PcRiskFlag>()),
+        new ActDecision(actions.RootElement.Clone(), state, "Change"),
+        new ActDecision(actions.RootElement.Clone(), state, "Change"),
+        new ActDecision(actions.RootElement.Clone(), state, "Change"),
         new FinishDecision("Recovered.", state, "Visible fixture"),
     ]);
     using var desktop = new FakeDesktop([Observation(1, [9]), Observation(2, [9]), Observation(3, [9]), Observation(4, [9])]);
@@ -1364,17 +1186,8 @@ static PcAgentOptions Options() => new(
     MaxConsecutiveNoProgressTurns: 3,
     ImageDetail: "original");
 
-static PcRunScope Scope() => new(
-    AllowExternalCommunication: false,
-    AllowRemoteContentChanges: false,
-    AllowLocalDeletion: false,
-    AllowCredentials: true,
-    AllowPurchases: false,
-    AllowAccountOrPermissionChanges: false);
-
 static PcRunRequest Request(int maxNoProgress) => new(
     "Complete the harmless fixture.",
-    Scope(),
     new PcRunLimits(12, 32, 30_000, maxNoProgress),
     ReturnFinalScreenshot: false);
 

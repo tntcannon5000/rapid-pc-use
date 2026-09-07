@@ -39,7 +39,6 @@ internal static class SecurityLimits
     internal const int MaxAgentBrokerResponseCharacters = 2_000_000;
     internal const int MaxAgentBrokerPipeNameCharacters = 128;
     internal const int MaxAgentBrokerTokenCharacters = 256;
-    internal const int MaxAgentConfirmationSummaryCharacters = 600;
     internal const int MaxAgentHandoffRequestCharacters = 600;
     internal const int MaxAgentOuterContextCharacters = 1_200;
     internal const int MaxAgentRetrievalQueryCharacters = 240;
@@ -48,6 +47,5 @@ internal static class SecurityLimits
     internal const int MaxAgentRunbookStepIdCharacters = 64;
     internal const int MaxAgentLaunchUriCharacters = 2_048;
     internal static readonly TimeSpan MaxFrameAge = TimeSpan.FromSeconds(30);
-    internal static readonly TimeSpan AgentConfirmationLifetime = TimeSpan.FromMinutes(5);
     internal static readonly TimeSpan AgentHandoffLifetime = TimeSpan.FromMinutes(5);
 }

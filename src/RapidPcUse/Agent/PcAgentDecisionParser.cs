@@ -32,7 +32,6 @@ internal static class PcAgentDecisionParser
             "retrieve" => ParseRetrieve(root),
             "runbook_step" => ParseRunbookStep(root),
             "finish" => ParseFinish(root),
-            "confirm" => ParseConfirm(root),
             "handoff" => ParseHandoff(root),
             "blocked" => ParseBlocked(root),
             _ => throw new InvalidOperationException("The model returned an unknown structured decision."),
@@ -64,7 +63,6 @@ internal static class PcAgentDecisionParser
             "computer_retrieve" => ParseRetrieve(root),
             "computer_runbook_step" => ParseRunbookStep(root),
             "computer_finish" => ParseFinish(root),
-            "computer_request_confirmation" => ParseConfirm(root),
             "computer_handoff" => ParseHandoff(root),
             "computer_blocked" => ParseBlocked(root),
             _ => throw new InvalidOperationException("The model returned an unknown decision tool."),
@@ -116,25 +114,6 @@ internal static class PcAgentDecisionParser
         }
 
         var expectedChange = BoundedString(root, "expected_change", SecurityLimits.MaxAgentStateFieldCharacters);
-        var risks = new HashSet<PcRiskFlag>();
-        if (root.TryGetProperty("risk_flags", out var riskFlags))
-        {
-            if (riskFlags.ValueKind != JsonValueKind.Array || riskFlags.GetArrayLength() > 8)
-            {
-                throw new InvalidOperationException("risk_flags must be a bounded array.");
-            }
-
-            foreach (var item in riskFlags.EnumerateArray())
-            {
-                if (item.ValueKind != JsonValueKind.String || !TryParseRisk(item.GetString(), out var risk))
-                {
-                    throw new InvalidOperationException("The model returned an unknown risk flag.");
-                }
-
-                risks.Add(risk);
-            }
-        }
-
         var completionGuardText = OptionalBoundedString(
             root,
             "completion_guard_text",
@@ -153,7 +132,6 @@ internal static class PcAgentDecisionParser
             actions.Clone(),
             ParseMemory(root),
             expectedChange,
-            risks,
             completionGuardText,
             completionSummary);
     }
@@ -197,20 +175,6 @@ internal static class PcAgentDecisionParser
             key,
             stepId,
             BoundedString(root, "expected_change", SecurityLimits.MaxAgentStateFieldCharacters),
-            ParseMemory(root));
-    }
-
-    private static ConfirmDecision ParseConfirm(JsonElement root)
-    {
-        var riskText = BoundedString(root, "risk", 64);
-        if (!TryParseRisk(riskText, out var risk))
-        {
-            throw new InvalidOperationException("The model requested confirmation for an unknown risk.");
-        }
-
-        return new ConfirmDecision(
-            BoundedString(root, "operation_summary", SecurityLimits.MaxAgentConfirmationSummaryCharacters),
-            risk,
             ParseMemory(root));
     }
 
@@ -337,40 +301,6 @@ internal static class PcAgentDecisionParser
             throw new InvalidOperationException("Agent state may not retain image data.");
         }
     }
-
-    internal static bool TryParseRisk(string? value, out PcRiskFlag risk)
-    {
-        risk = value switch
-        {
-            "local_process_launch" => PcRiskFlag.LocalProcessLaunch,
-            "external_communication" => PcRiskFlag.ExternalCommunication,
-            "remote_content_change" => PcRiskFlag.RemoteContentChange,
-            "local_deletion" => PcRiskFlag.LocalDeletion,
-            "credential_entry" => PcRiskFlag.CredentialEntry,
-            "purchase_or_financial" => PcRiskFlag.PurchaseOrFinancial,
-            "account_or_permission_change" => PcRiskFlag.AccountOrPermissionChange,
-            "download_or_install" => PcRiskFlag.DownloadOrInstall,
-            "unclassified_sensitive_action" => PcRiskFlag.UnclassifiedSensitiveAction,
-            _ => default,
-        };
-        return value is "local_process_launch" or "external_communication" or "remote_content_change" or "local_deletion" or "credential_entry" or
-            "purchase_or_financial" or "account_or_permission_change" or "download_or_install" or
-            "unclassified_sensitive_action";
-    }
-
-    internal static string RiskName(PcRiskFlag risk) => risk switch
-    {
-        PcRiskFlag.LocalProcessLaunch => "local_process_launch",
-        PcRiskFlag.ExternalCommunication => "external_communication",
-        PcRiskFlag.RemoteContentChange => "remote_content_change",
-        PcRiskFlag.LocalDeletion => "local_deletion",
-        PcRiskFlag.CredentialEntry => "credential_entry",
-        PcRiskFlag.PurchaseOrFinancial => "purchase_or_financial",
-        PcRiskFlag.AccountOrPermissionChange => "account_or_permission_change",
-        PcRiskFlag.DownloadOrInstall => "download_or_install",
-        PcRiskFlag.UnclassifiedSensitiveAction => "unclassified_sensitive_action",
-        _ => throw new ArgumentOutOfRangeException(nameof(risk)),
-    };
 
     internal static bool TryParseHandoffReason(string? value, out PcHandoffReason reason)
     {
