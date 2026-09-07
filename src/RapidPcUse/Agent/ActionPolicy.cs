@@ -13,19 +13,10 @@ internal interface IForegroundWindowInspector
     string GetProcessName();
 }
 
-internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
+internal static class ActionPolicy
 {
-    internal ActionPolicyResult Evaluate(ActDecision decision, PcRunScope scope, PcRiskFlag? approvedRisk)
+    internal static ActionPolicyResult Evaluate(ActDecision decision, PcRunScope scope, PcRiskFlag? approvedRisk)
     {
-        if (scope.AllowedProcesses.Count > 0)
-        {
-            var processName = NormalizeProcessName(windowInspector.GetProcessName());
-            if (!scope.AllowedProcesses.Contains(processName))
-            {
-                return new ActionPolicyResult(false, null, "The foreground application is outside the authorized process scope.", false);
-            }
-        }
-
         var risks = new HashSet<PcRiskFlag>(decision.RiskFlags);
         AddInferredRisks(decision.Actions, risks);
         var consumedApproval = false;
@@ -44,23 +35,6 @@ internal sealed class ActionPolicy(IForegroundWindowInspector windowInspector)
         }
 
         return new ActionPolicyResult(true, null, null, consumedApproval);
-    }
-
-    internal static string NormalizeProcessName(string value)
-    {
-        var normalized = value.Trim();
-        if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-        {
-            normalized = normalized[..^4];
-        }
-
-        if (normalized.Length == 0 || normalized.Length > SecurityLimits.MaxAgentProcessNameCharacters ||
-            normalized.Any(character => char.IsControl(character) || character is '\\' or '/' or ':' or '*' or '?' or '"' or '<' or '>' or '|'))
-        {
-            throw new ArgumentException("The process name is invalid.");
-        }
-
-        return normalized.ToLowerInvariant();
     }
 
     private static bool RequiresConfirmation(PcRiskFlag risk, PcRunScope scope) => risk switch

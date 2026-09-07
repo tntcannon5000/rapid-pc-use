@@ -48,7 +48,6 @@ internal enum PcRiskFlag
 }
 
 internal sealed record PcRunScope(
-    IReadOnlySet<string> AllowedProcesses,
     bool AllowExternalCommunication,
     bool AllowRemoteContentChanges,
     bool AllowLocalDeletion,

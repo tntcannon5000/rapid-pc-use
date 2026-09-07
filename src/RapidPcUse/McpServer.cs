@@ -991,16 +991,6 @@ internal sealed class McpServer(
         ["type"] = "object",
         ["properties"] = new Dictionary<string, object?>
         {
-            ["allowed_processes"] = new Dictionary<string, object?>
-            {
-                ["type"] = "array",
-                ["maxItems"] = SecurityLimits.MaxAgentAllowedProcesses,
-                ["items"] = new Dictionary<string, object?>
-                {
-                    ["type"] = "string",
-                    ["maxLength"] = SecurityLimits.MaxAgentProcessNameCharacters,
-                },
-            },
             ["allow_external_communication"] = BooleanSchema(),
             ["allow_remote_content_changes"] = BooleanSchema(),
             ["allow_local_deletion"] = BooleanSchema(),
@@ -1132,27 +1122,7 @@ internal sealed class McpServer(
         var scopeElement = arguments.TryGetProperty("scope", out var scopeValue)
             ? RequireObject(scopeValue, "scope")
             : default;
-        var allowedProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (scopeElement.ValueKind == JsonValueKind.Object && scopeElement.TryGetProperty("allowed_processes", out var processes))
-        {
-            if (processes.ValueKind != JsonValueKind.Array || processes.GetArrayLength() > SecurityLimits.MaxAgentAllowedProcesses)
-            {
-                throw new ArgumentException("allowed_processes must be a bounded array.");
-            }
-
-            foreach (var process in processes.EnumerateArray())
-            {
-                if (process.ValueKind != JsonValueKind.String)
-                {
-                    throw new ArgumentException("allowed_processes entries must be strings.");
-                }
-
-                allowedProcesses.Add(ActionPolicy.NormalizeProcessName(process.GetString()!));
-            }
-        }
-
         var scope = new PcRunScope(
-            allowedProcesses,
             StrictOptionalBoolean(scopeElement, "allow_external_communication", false),
             StrictOptionalBoolean(scopeElement, "allow_remote_content_changes", false),
             StrictOptionalBoolean(scopeElement, "allow_local_deletion", false),
@@ -1271,11 +1241,6 @@ internal sealed class McpServer(
                         scopeValue.ValueKind == JsonValueKind.Object
                 ? scopeValue
                 : default;
-            var processCount = scope.ValueKind == JsonValueKind.Object &&
-                               scope.TryGetProperty("allowed_processes", out var processes) &&
-                               processes.ValueKind == JsonValueKind.Array
-                ? Math.Min(processes.GetArrayLength(), SecurityLimits.MaxAgentAllowedProcesses)
-                : 0;
             return new
             {
                 task_characters = arguments.ValueKind == JsonValueKind.Object &&
@@ -1293,13 +1258,12 @@ internal sealed class McpServer(
                                         launchUri.ValueKind == JsonValueKind.String
                     ? Math.Min(launchUri.GetString()?.Length ?? 0, SecurityLimits.MaxAgentLaunchUriCharacters + 1)
                     : 0,
-                allowed_process_count = processCount,
                 allow_external_communication = OptionalBoolean(scope, "allow_external_communication", false),
                 allow_remote_content_changes = OptionalBoolean(scope, "allow_remote_content_changes", false),
                 allow_local_deletion = OptionalBoolean(scope, "allow_local_deletion", false),
                 allow_local_process_launches = OptionalBoolean(scope, "allow_local_process_launches", false),
                 requested_limits = SafeRequestedLimits(arguments),
-                privacy = "Task, process names, and other literal scope content omitted.",
+                privacy = "Task and other literal scope content omitted.",
             };
         }
 

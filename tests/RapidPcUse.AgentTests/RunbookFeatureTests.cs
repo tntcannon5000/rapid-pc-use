@@ -1111,7 +1111,6 @@ internal static class RunbookFeatureTests
         ImageDetail: "original");
 
     private static PcRunScope Scope() => new(
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase),
         AllowExternalCommunication: false,
         AllowRemoteContentChanges: false,
         AllowLocalDeletion: false,

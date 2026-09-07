@@ -61,8 +61,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("local completion guard eliminates the final model barrier", CompletionGuardEliminatesFinalModelBarrier),
     ("unmatched completion guard falls back to model verification", UnmatchedCompletionGuardFallsBack),
     ("MCP pc_run completes in one compact outer response", McpRunIsOneCompactResponse),
+    ("MCP pc_run does not expose a foreground process lock", McpRunSchemaOmitsProcessLock),
     ("MCP pc_run normalizes oversized outer-agent budgets", McpRunNormalizesOversizedBudgets),
-    ("MCP pc_run accepts real Windows process names with spaces", McpRunAcceptsSpacedProcessNames),
     ("invalid MCP pc_run arguments are recoverable", McpRunRejectsInvalidArgumentsWithoutFailure),
     ("cross-host desktop contention is recoverable", McpRunReportsControlBusyWithoutFailure),
     ("cross-host contention cannot replay a paused continuation", McpResumeReportsControlBusyAsNonReplayable),
@@ -112,7 +112,6 @@ var tests = new (string Name, Func<Task> Run)[]
     ("runbook app interfaces are loopback-only and effect-attributed", RunbookFeatureTests.RunbookLocalInterfacesAreLoopbackAndAttributed),
     ("MCP runbook schema matches the structured route handler", RunbookFeatureTests.McpRunbookSchemaMatchesHandler),
     ("web fast start never selects a competing foreground browser", RunbookFeatureTests.FastStartRejectsCompetingBrowser),
-    ("foreground process scope blocks out-of-scope input", ProcessScopeBlocksInput),
     ("repeated no-progress actions trigger recovery and continue", NoProgressRecovers),
     ("physical Escape cancels an in-flight provider call", TakeoverCancelsProvider),
     ("physical Escape returns the canonical signal to the outer MCP caller", TakeoverReturnsToOuterMcp),
@@ -585,13 +584,35 @@ static Task McpRunIsOneCompactResponse()
     return Task.CompletedTask;
 }
 
+static Task McpRunSchemaOmitsProcessLock()
+{
+    using var desktop = new FakeDesktop([]);
+    using var provider = new RecordingProvider([]);
+    using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n";
+    using var reader = new StringReader(input);
+    using var writer = new StringWriter();
+    new McpServer(desktop, loop, reader, writer).Run();
+    using var response = JsonDocument.Parse(writer.ToString().Trim());
+    var pcRun = response.RootElement.GetProperty("result").GetProperty("tools")
+        .EnumerateArray()
+        .Single(tool => tool.GetProperty("name").GetString() == "pc_run");
+    var scopeProperties = pcRun.GetProperty("inputSchema")
+        .GetProperty("properties")
+        .GetProperty("scope")
+        .GetProperty("properties");
+    Assert(!scopeProperties.TryGetProperty("allowed_processes", out _),
+        "pc_run still exposes the foreground process lock");
+    return Task.CompletedTask;
+}
+
 static Task McpRunNormalizesOversizedBudgets()
 {
     var state = new AgentWorkingState("Fixture visible", ["Fixture completed"], "", [], []);
     using var provider = new ReplayPcModelProvider([new FinishDecision("Fixture completed.", state, "Visible fixture")]);
     using var desktop = new FakeDesktop([Observation(1, [1, 2, 3])]);
     using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Configure a VIMLE sofa without purchasing it.\",\"scope\":{\"allowed_processes\":[\"chrome\",\"msedge\",\"firefox\"],\"allow_external_communication\":false,\"allow_local_deletion\":false,\"allow_credentials\":false,\"allow_purchases\":false,\"allow_account_or_permission_changes\":false},\"limits\":{\"max_duration_ms\":600000,\"max_actions\":200,\"max_model_turns\":50,\"max_consecutive_no_progress_turns\":8},\"return_final_screenshot\":false}}}\n";
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Configure a VIMLE sofa without purchasing it.\",\"scope\":{\"allow_external_communication\":false,\"allow_local_deletion\":false,\"allow_credentials\":false,\"allow_purchases\":false,\"allow_account_or_permission_changes\":false},\"limits\":{\"max_duration_ms\":600000,\"max_actions\":200,\"max_model_turns\":50,\"max_consecutive_no_progress_turns\":8},\"return_final_screenshot\":false}}}\n";
     using var reader = new StringReader(input);
     using var writer = new StringWriter();
     var server = new McpServer(desktop, loop, reader, writer);
@@ -605,34 +626,12 @@ static Task McpRunNormalizesOversizedBudgets()
     return Task.CompletedTask;
 }
 
-static Task McpRunAcceptsSpacedProcessNames()
-{
-    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ActDecision(actions.RootElement.Clone(), AgentWorkingState.Empty, "Change", new HashSet<PcRiskFlag>()),
-        new FinishDecision("Fixture completed.", AgentWorkingState.Empty, "Visible fixture"),
-    ]);
-    using var desktop = new FakeDesktop([Observation(1, [1]), Observation(2, [2])]);
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new NamedWindowInspector("DeepSeek Harness Desktop"));
-    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"DeepSeek Harness Desktop\"]}}}}\n";
-    using var reader = new StringReader(input);
-    using var writer = new StringWriter();
-    new McpServer(desktop, loop, reader, writer).Run();
-    using var response = JsonDocument.Parse(writer.ToString().Trim());
-    var result = response.RootElement.GetProperty("result");
-    Assert(result.GetProperty("structuredContent").GetProperty("status").GetString() == "completed",
-        "a valid Windows process name with spaces did not complete");
-    Assert(desktop.ActionBatches.Count == 1, "matching spaced process scope blocked native input");
-    return Task.CompletedTask;
-}
-
 static Task McpRunRejectsInvalidArgumentsWithoutFailure()
 {
     using var provider = new RecordingProvider([]);
     using var desktop = new FakeDesktop([]);
     using var loop = new PcAgentLoop(desktop, provider, Options(), new FixedWindowInspector());
-    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allowed_processes\":[\"C:\\\\untrusted.exe\"]}}}}\n";
+    const string input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pc_run\",\"arguments\":{\"task\":\"Complete the harmless fixture.\",\"scope\":{\"allow_external_communication\":\"yes\"}}}}\n";
     using var reader = new StringReader(input);
     using var writer = new StringWriter();
     new McpServer(desktop, loop, reader, writer).Run();
@@ -1280,39 +1279,19 @@ static Task RemoteContentChangeUsesDedicatedScope()
         AgentWorkingState.Empty,
         "Remote message is removed",
         new HashSet<PcRiskFlag> { PcRiskFlag.RemoteContentChange });
-    var policy = new ActionPolicy(new FixedWindowInspector());
-    var denied = policy.Evaluate(decision, Scope(), approvedRisk: null);
+    var denied = ActionPolicy.Evaluate(decision, Scope(), approvedRisk: null);
     Assert(denied.ConfirmationRisk == PcRiskFlag.RemoteContentChange, "remote mutation did not request its dedicated authority");
-    var remoteOnly = policy.Evaluate(
+    var remoteOnly = ActionPolicy.Evaluate(
         decision,
         Scope() with { AllowRemoteContentChanges = true },
         approvedRisk: null);
     Assert(remoteOnly.ConfirmationRisk == PcRiskFlag.LocalDeletion,
         "a model-declared remote risk suppressed the driver's DELETE inference");
-    var allowed = policy.Evaluate(
+    var allowed = ActionPolicy.Evaluate(
         decision,
         Scope() with { AllowRemoteContentChanges = true, AllowLocalDeletion = true },
         approvedRisk: null);
     Assert(allowed.Allowed && allowed.ConfirmationRisk is null, "fully scoped remote DELETE did not pass policy");
-    return Task.CompletedTask;
-}
-
-static Task ProcessScopeBlocksInput()
-{
-    using var actions = JsonDocument.Parse("[{\"type\":\"click\",\"display_id\":\"display-1\",\"x\":500,\"y\":500,\"button\":\"left\",\"count\":1}]");
-    using var provider = new ReplayPcModelProvider(
-    [
-        new ActDecision(actions.RootElement.Clone(), AgentWorkingState.Empty, "Change", new HashSet<PcRiskFlag>()),
-    ]);
-    using var desktop = new FakeDesktop([Observation(1, [1])]);
-    using var loop = new PcAgentLoop(desktop, provider, Options(), new NamedWindowInspector("outside"));
-    var scopedRequest = Request(maxNoProgress: 3) with
-    {
-        Scope = Scope() with { AllowedProcesses = new HashSet<string>(["fixture"], StringComparer.OrdinalIgnoreCase) },
-    };
-    var result = loop.Run(scopedRequest);
-    Assert(result.Status == PcAgentStatus.Blocked, "out-of-scope foreground process was not blocked");
-    Assert(desktop.ActionBatches.Count == 0, "out-of-scope input was executed");
     return Task.CompletedTask;
 }
 
@@ -1386,7 +1365,6 @@ static PcAgentOptions Options() => new(
     ImageDetail: "original");
 
 static PcRunScope Scope() => new(
-    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
     AllowExternalCommunication: false,
     AllowRemoteContentChanges: false,
     AllowLocalDeletion: false,
@@ -1728,11 +1706,6 @@ internal sealed class FixedCompletionGuardVerifier(bool matched) : ICompletionGu
             throw new InvalidOperationException("completion guard text was changed before verification");
         }
     }
-}
-
-internal sealed class NamedWindowInspector(string processName) : IForegroundWindowInspector
-{
-    public string GetProcessName() => processName;
 }
 
 internal sealed class BlockingProvider : IPcModelProvider
