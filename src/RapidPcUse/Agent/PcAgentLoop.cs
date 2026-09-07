@@ -14,7 +14,6 @@ internal sealed partial class PcAgentLoop : IDisposable
     private readonly IPcDesktop _desktop;
     private readonly IPcModelProvider _provider;
     private readonly PcAgentOptions _options;
-    private readonly ActionPolicy _policy;
     private readonly ICompletionGuardVerifier _completionGuard;
     private readonly IPcLaunchCoordinator _launcher;
     private readonly IPcLocalRouteRuntime _localRoutes;
@@ -37,7 +36,7 @@ internal sealed partial class PcAgentLoop : IDisposable
         _desktop = desktop;
         _provider = provider;
         _options = options;
-        _policy = new ActionPolicy(windowInspector ?? new ForegroundWindowInspector());
+        _ = windowInspector;
         _completionGuard = completionGuard ?? new UiaCompletionGuardVerifier();
         _launcher = launcher ?? new PcLaunchCoordinator();
         _localRoutes = localRoutes ?? new PcLocalRouteRuntime();
@@ -534,7 +533,7 @@ internal sealed partial class PcAgentLoop : IDisposable
                     case ActDecision act:
                         session.State = act.NextState;
                         var policyStarted = Stopwatch.GetTimestamp();
-                        var policy = _policy.Evaluate(act, session.Request.Scope, session.ApprovedRisk);
+                        var policy = ActionPolicy.Evaluate(act, session.Request.Scope, session.ApprovedRisk);
                         AgentTelemetry.PolicyEvaluated(
                             session.RunId,
                             session.ModelTurns,
@@ -925,16 +924,6 @@ internal sealed partial class PcAgentLoop : IDisposable
         if (!string.IsNullOrWhiteSpace(request.LaunchUri))
         {
             _ = PcLaunchCoordinator.ValidateUri(request.LaunchUri);
-        }
-
-        if (request.Scope.AllowedProcesses.Count > SecurityLimits.MaxAgentAllowedProcesses)
-        {
-            throw new ArgumentException("allowed_processes contains too many entries.");
-        }
-
-        foreach (var process in request.Scope.AllowedProcesses)
-        {
-            _ = ActionPolicy.NormalizeProcessName(process);
         }
 
         if (request.Limits.MaxModelTurns is < 1 or > SecurityLimits.MaxAgentModelTurns ||

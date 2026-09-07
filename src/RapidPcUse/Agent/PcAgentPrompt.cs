@@ -39,7 +39,6 @@ internal static class PcAgentPrompt
     {
         var scope = new
         {
-            allowed_processes = request.Scope.AllowedProcesses.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             allow_external_communication = request.Scope.AllowExternalCommunication,
             allow_remote_content_changes = request.Scope.AllowRemoteContentChanges,
             allow_local_deletion = request.Scope.AllowLocalDeletion,

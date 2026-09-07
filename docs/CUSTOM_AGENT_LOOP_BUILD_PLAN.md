@@ -127,7 +127,6 @@ Proposed input:
 {
   "task": "Open Discord, send Jeremy the document, then delete the local file.",
   "scope": {
-    "allowed_processes": ["explorer", "discord"],
     "allow_external_communication": true,
     "allow_local_deletion": true,
     "allow_credentials": false,
@@ -148,7 +147,6 @@ Schema rules:
 
 - `task`: required, 1–4,000 UTF-16 code units.
 - `scope`: required. Every sensitive capability defaults to `false` if omitted.
-- `allowed_processes`: optional, maximum 16 normalized process names, each maximum 64 characters. When supplied, native input is denied if the foreground process is outside the set. Windows shell surfaces required to switch applications are handled through an explicit, documented shell allow rule rather than an implicit wildcard.
 - `limits`: optional and may only lower repository-configured hard ceilings. Defaults are shown above.
 - `return_final_screenshot`: diagnostics only; default `false` to keep the outer context compact.
 - Provider, model, endpoint, and API credentials are process configuration, not tool arguments. This prevents an outer prompt or on-screen injection from redirecting traffic.

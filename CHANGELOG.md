@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove the optional foreground-process lock from `pc_run`; cross-application workflows now remain inside the same fast visual loop while effect-specific authority boundaries continue to apply.
 - Start capture and reasoning without a speculative pointer preflight; validate native input only when the requested action uses it so observation and keyboard-only work are not blocked by an unrelated pointer probe.
 - Verify absolute pointer coordinates before pressing a button, detect ignored relative motion when movement is possible, and preserve stage-specific failures across move, click, drag, mouse-button, and scroll actions.
 - Enforce a 5 ms minimum typing interval alongside the existing 80 ms click floor so ordinary controls can process fast multi-field batches reliably.

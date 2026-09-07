@@ -26,8 +26,6 @@ internal static class SecurityLimits
     internal const int MaxAgentStateEntries = 8;
     internal const int MaxAgentStateEntryCharacters = 160;
     internal const int MaxAgentRecentOutcomes = 3;
-    internal const int MaxAgentAllowedProcesses = 16;
-    internal const int MaxAgentProcessNameCharacters = 64;
     internal const int MaxAgentModelTurns = 50;
     internal const int MaxAgentActions = 256;
     internal const int MaxAgentDurationMilliseconds = 300_000;
