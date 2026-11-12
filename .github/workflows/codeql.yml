@@ -24,7 +24,7 @@ jobs:
         with:
           dotnet-version: 10.0.110
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@1ad29ea4a422cce9a242a9fae469541dcd08addc
+        uses: github/codeql-action/init@3ea37a44b6e4e6847c46edae209410d258d548d1
         with:
           languages: csharp
           build-mode: manual
