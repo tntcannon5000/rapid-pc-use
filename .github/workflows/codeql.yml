@@ -32,6 +32,6 @@ jobs:
         shell: powershell
         run: .\scripts\build.ps1
       - name: Analyze
-        uses: github/codeql-action/analyze@1ad29ea4a422cce9a242a9fae469541dcd08addc
+        uses: github/codeql-action/analyze@e9c4b4b153701845b921f167180044d14fe89b94
         with:
           category: /language:csharp
